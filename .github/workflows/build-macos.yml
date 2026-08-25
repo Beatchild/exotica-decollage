@@ -5,6 +5,9 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-latest
@@ -33,3 +36,13 @@ jobs:
             src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
             src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
           if-no-files-found: error
+
+      - name: Commit dmg back to the repo
+        run: |
+          mkdir -p release
+          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg "release/Exotica-Decollage-macOS.dmg"
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add release
+          git commit -m "macOS build ${{ github.sha }} [skip ci]"
+          git push
