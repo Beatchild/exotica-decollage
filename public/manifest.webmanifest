@@ -1,0 +1,23 @@
+{
+  "name": "Exotica Décollage",
+  "short_name": "Exotica",
+  "description": "Generative plunderphonics & musique concrète studio",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F4EFEA",
+  "theme_color": "#1A1A1A",
+  "icons": [
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
