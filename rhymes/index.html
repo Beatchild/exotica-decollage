@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ka">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#14161B" />
+    <meta
+      name="description"
+      content="რითმეული — ქართული რითმის ლექსიკონი ლირიკოსებს, რეპერებს და პოეტებს. 386 201 სიტყვაფორმა: ზუსტი და მონათესავე რითმები, ასონანსი, ალიტერაცია."
+    />
+    <title>რითმეული</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Noto+Sans+Georgian:wght@400;600;700&family=Noto+Serif+Georgian:wght@500;800&display=swap"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="masthead">
+        <h1 class="wordmark">რითმ<span class="mark-accent">ეული</span></h1>
+        <p class="tagline">ქართული რითმის ლექსიკონი — ლირიკოსებს, რეპერებს, პოეტებს</p>
+      </header>
+
+      <section class="hero">
+        <div class="ghost" id="ghost" aria-hidden="true">რ</div>
+        <div class="searchbox">
+          <input
+            id="q"
+            type="text"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+            placeholder="ჩაწერე სიტყვა…"
+            aria-label="საძიებო სიტყვა"
+          />
+          <button class="go" id="go">ძებნა</button>
+        </div>
+        <p class="hint" id="hint">
+          შეიძლება მთელი სტრიქონიც ჩააგდო — ბოლო სიტყვას ავიღებ. ზუსტი დაბოლოებისთვის დაიწყე
+          დეფისით: <em>-ული</em>
+        </p>
+
+        <div class="modebar">
+          <div class="tabs" role="tablist" aria-label="ძიების რეჟიმი">
+            <button class="tab" role="tab" aria-selected="true" data-mode="rhyme">რითმები</button>
+            <button class="tab" role="tab" aria-selected="false" data-mode="assonance">ასონანსი</button>
+            <button class="tab" role="tab" aria-selected="false" data-mode="alliteration">ალიტერაცია</button>
+          </div>
+          <div class="sylfilter" id="sylfilter" role="group" aria-label="მარცვლების ფილტრი">
+            <span class="lbl">მარცვალი</span>
+            <button class="sylchip" data-syl="0" aria-pressed="true">ყველა</button>
+            <button class="sylchip" data-syl="1" aria-pressed="false">1</button>
+            <button class="sylchip" data-syl="2" aria-pressed="false">2</button>
+            <button class="sylchip" data-syl="3" aria-pressed="false">3</button>
+            <button class="sylchip" data-syl="4" aria-pressed="false">4</button>
+            <button class="sylchip" data-syl="5" aria-pressed="false">5</button>
+            <button class="sylchip" data-syl="6" aria-pressed="false">6+</button>
+          </div>
+        </div>
+      </section>
+
+      <main class="workspace">
+        <section id="results-col" aria-label="შედეგები">
+          <p class="status" id="status">ლექსიკონი იტვირთება…</p>
+          <div id="results"></div>
+        </section>
+
+        <aside class="pad" aria-label="რვეული">
+          <h2>
+            რვეული
+            <span class="padtools">
+              <button id="pad-copy">კოპირება</button>
+              <button id="pad-clear">გასუფთავება</button>
+            </span>
+          </h2>
+          <p class="padhint">ციფრი სტრიქონის მარცვლებს ითვლის · ინახება ამ ბრაუზერში</p>
+          <div class="padgrid">
+            <div class="gutter" id="gutter" aria-hidden="true"></div>
+            <textarea
+              id="pad-text"
+              wrap="off"
+              placeholder="აქ დაწერე შენი ბარები…"
+              aria-label="ტექსტის რვეული"
+            ></textarea>
+          </div>
+          <div class="suggest" id="suggest" hidden>
+            <span class="sug-label"
+              >რითმები სიტყვაზე <span class="sug-word" id="sug-word"></span> · დაჭერა კოპირებს</span
+            >
+            <div class="sugcloud" id="sugcloud"></div>
+          </div>
+        </aside>
+      </main>
+
+      <footer class="colophon">
+        <span class="dedication"
+          >ყველა ბავშვს, ვინც ერთ დღეს საყვარელ არტისტთან ერთად ტრეკს ჩაწერს&nbsp;🤍</span
+        >
+        <span
+          >386 201 სიტყვაფორმა · წყაროები:
+          <a href="https://github.com/gamag/ka_GE.spell">ka_GE.spell</a> (MIT) ·
+          <a href="https://github.com/bumbeishvili/GeoWordsDatabase">GeoWordsDatabase</a> (MIT) ·
+          <a href="http://crubadan.org/">Crúbadán</a> (CC-BY 4.0)</span
+        >
+      </footer>
+    </div>
+
+    <div class="toast" id="toast" role="status">დაკოპირდა</div>
+
+    <script src="ka-words.js"></script>
+    <script src="engine.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
