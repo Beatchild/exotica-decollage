@@ -961,6 +961,8 @@ export function useAudioEngine() {
 
   const getPreviewPos = useCallback(() => engine.previewPosition(), [])
 
+  const getPhraseInfo = useCallback(() => engine.phraseInfo(), [])
+
   const regionSplice = useCallback(
     (sourceIdx: number, regions: Array<{ start: number; dur: number }>) => {
       engine.regionsToSpliced(sourceIdx, regions)
@@ -1073,6 +1075,7 @@ export function useAudioEngine() {
     previewFrom,
     previewRegions,
     getPreviewPos,
+    getPhraseInfo,
     regionLoop,
     regionToSource,
     regionSplice,

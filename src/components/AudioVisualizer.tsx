@@ -28,6 +28,7 @@ interface Props {
   onPreviewFrom: (sourceIdx: number, sec: number) => void
   onPreviewRegions: (sourceIdx: number, regions: Array<{ start: number; dur: number }>) => void
   getPreviewPos: () => { idx: number; sec: number } | null
+  getPhraseInfo: () => { sourceIdx: number; start: number; dur: number; sec: number } | null
 }
 
 const peaksCache = new WeakMap<AudioBuffer, { key: string; peaks: Array<[number, number]> }>()
@@ -78,6 +79,7 @@ export function AudioVisualizer({
   onPreviewFrom,
   onPreviewRegions,
   getPreviewPos,
+  getPhraseInfo,
 }: Props) {
   // mouse-selected waveform regions, in seconds of the selected source
   const [regions, setRegions] = useState<Array<{ a: number; b: number }>>([])
@@ -193,6 +195,47 @@ export function AudioVisualizer({
             g.lineTo(x1, h)
             g.stroke()
             g.globalAlpha = 1
+          }
+
+          // running phrase loop: region band + cycling playhead
+          const ph = getPhraseInfo()
+          if (ph && ph.sourceIdx === sel) {
+            const x0 = timeToX(ph.start)
+            const x1 = timeToX(ph.start + ph.dur)
+            if (x1 >= 0 && x0 <= w) {
+              g.fillStyle = BURNT
+              g.globalAlpha = 0.1
+              g.fillRect(x0, 0, Math.max(1, x1 - x0), h)
+              g.globalAlpha = 0.7
+              g.strokeStyle = BURNT
+              g.setLineDash([4, 3])
+              g.beginPath()
+              g.moveTo(x0, 0)
+              g.lineTo(x0, h)
+              g.moveTo(x1, 0)
+              g.lineTo(x1, h)
+              g.stroke()
+              g.setLineDash([])
+              const xp = timeToX(ph.sec)
+              if (xp >= 0 && xp <= w) {
+                g.globalAlpha = 1
+                g.lineWidth = 2
+                g.beginPath()
+                g.moveTo(xp, 0)
+                g.lineTo(xp, h)
+                g.stroke()
+                g.lineWidth = 1
+                g.fillStyle = BURNT
+                g.globalAlpha = 1
+                g.beginPath()
+                g.moveTo(xp - 5, 0)
+                g.lineTo(xp + 5, 0)
+                g.lineTo(xp, 7)
+                g.closePath()
+                g.fill()
+              }
+              g.globalAlpha = 1
+            }
           }
 
           // preview playhead
@@ -484,7 +527,7 @@ export function AudioVisualizer({
         </div>
         <canvas
           ref={waveRef}
-          className="w-full h-32 block cursor-col-resize"
+          className="w-full h-48 block cursor-col-resize"
           onMouseDown={handleWaveDown}
           onDoubleClick={(e) => {
             const canvas = waveRef.current

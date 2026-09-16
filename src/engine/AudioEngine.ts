@@ -155,6 +155,11 @@ export class AudioEngine {
   private previewNodes: AudioBufferSourceNode[] = []
   private previewGain: GainNode | null = null
   private previewStartInfo: { ctxTime: number; parts: Array<{ start: number; dur: number }> } | null = null
+  /** current phrase-loop cycle: when the running repeat started, and where */
+  private phraseCycle: {
+    start: number
+    region: { sourceIdx: number; start: number; dur: number }
+  } | null = null
   playing = false
   masterMuted = false
   masterVolume = 0.8
@@ -2186,6 +2191,23 @@ export class AudioEngine {
     this.emitChange()
   }
 
+  /**
+   * The running phrase loop, for the waveform: region bounds + the playhead
+   * cycling inside it. Null when nothing is looping audibly.
+   */
+  phraseInfo(): { sourceIdx: number; start: number; dur: number; sec: number } | null {
+    if (!this.ctx || !this.playing || !this.phraseMode || !this.phraseCycle) return null
+    const { start, region } = this.phraseCycle
+    const el = this.ctx.currentTime - start
+    const pos = el < 0 ? 0 : Math.min(el, region.dur)
+    return {
+      sourceIdx: region.sourceIdx,
+      start: region.start,
+      dur: region.dur,
+      sec: region.start + pos,
+    }
+  }
+
   /** Current preview playhead position in the source, for the waveform cursor. */
   previewPosition(): { idx: number; sec: number } | null {
     if (!this.ctx || this.previewSource === null || !this.previewStartInfo) return null
@@ -2372,6 +2394,7 @@ export class AudioEngine {
       if (region) {
         const ev = this.phraseEventFor(region)
         if (ev) this.realizeEvent(ev, this.ctx.currentTime + LOOKAHEAD)
+        this.phraseCycle = { start: this.ctx.currentTime + LOOKAHEAD, region }
         this.timers[0] = window.setTimeout(
           () => this.scheduleVoice1(),
           Math.max(300, (region.dur - 0.08) * 1000),

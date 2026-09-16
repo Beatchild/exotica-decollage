@@ -19,7 +19,7 @@ fn ytdlp_command(args: &[&str]) -> Command {
 
 /// Build stamp: proves which frontend generation is embedded in this binary.
 /// Bump when shipping — grep-able in the exe and returned by yt_check.
-const BUILD_STAMP: &str = "exd-build-v28-navigate";
+const BUILD_STAMP: &str = "exd-build-v29-clarity";
 
 /// Is a yt-dlp binary reachable on PATH? Returns its version + build stamp.
 #[tauri::command]

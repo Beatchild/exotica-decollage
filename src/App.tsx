@@ -5,7 +5,6 @@ import {
 } from 'lucide-react'
 import { useAudioEngine } from './hooks/useAudioEngine'
 import { AudioVisualizer } from './components/AudioVisualizer'
-import { GenerativeArtwork } from './components/GenerativeArtwork'
 import { MixerRack } from './components/MixerRack'
 import { BUNDLED_STEMS } from './engine/stems'
 
@@ -170,11 +169,17 @@ export default function App() {
         <button
           onClick={api.toggleRecording}
           className="p-1.5 border border-charcoal/60 hover:bg-charcoal/10 flex items-center gap-1.5"
-          title={state.recording ? 'Stop & export WAV' : 'Record master (live)'}
+          title={
+            state.recording
+              ? 'Stop the live recording and save it as a WAV'
+              : 'LIVE recording: a microphone on the speakers — captures exactly what you hear while you perform (preset switches, morphs, keyboard playing), for as long as you leave it on. For a composed track use RENDER instead.'
+          }
           style={state.recording ? { background: BURNT, color: CREAM } : undefined}
         >
           {state.recording ? <Square size={14} /> : <Circle size={14} />}
-          <span className="text-[9px] tracking-widest">{state.recording ? 'EXPORT' : 'REC'}</span>
+          <span className="text-[9px] tracking-widest">
+            {state.recording ? 'STOP→WAV' : 'REC LIVE'}
+          </span>
         </button>
 
         {/* offline render — free-form length, drives RENDER / STEMS / REMIX / ALBUM */}
@@ -195,7 +200,7 @@ export default function App() {
             onClick={() => void api.renderToWav(renderMin)}
             disabled={state.rendering}
             className="flex items-center gap-1 text-[9px] tracking-widest hover:opacity-70"
-            title="Deterministic offline bounce of the current seed → WAV (uses the song sequence if scenes are set)"
+            title="OFFLINE render: composes N minutes from the current settings WITHOUT playing them aloud — the machine writes the track for you. Deterministic: same seed = same track. Follows the SONG plan if scenes are set. For capturing a live performance use REC LIVE instead."
             style={state.rendering ? { color: BURNT } : undefined}
           >
             <Download size={12} />
@@ -539,8 +544,8 @@ export default function App() {
         </span>
       </div>
 
-      {/* central matrix */}
-      <main className="flex-1 shrink-0 grid grid-cols-1 xl:grid-cols-[1fr_380px] gap-2">
+      {/* central matrix — full-width waveform + timbre map */}
+      <main className="flex-1 shrink-0 flex flex-col gap-2">
         <AudioVisualizer
           sources={state.sources}
           slices={state.slices}
@@ -556,12 +561,7 @@ export default function App() {
           onPreviewFrom={api.previewFrom}
           onPreviewRegions={api.previewRegions}
           getPreviewPos={api.getPreviewPos}
-        />
-        <GenerativeArtwork
-          firesRef={api.firesRef}
-          analyser={api.analyser}
-          palette={state.sleevePalette}
-          getAudioStream={api.getAudioStream}
+          getPhraseInfo={api.getPhraseInfo}
         />
       </main>
 
@@ -577,7 +577,7 @@ export default function App() {
             </span>
           )}
         </span>
-        <span>SPACE PLAY · R REC · 1–4 SCENES · 5-VOICE MATRIX · PHASE-FREE</span>
+        <span>SPACE PLAY · R REC · A–H SCENES · 8-VOICE MATRIX · PHASE-FREE</span>
       </footer>
     </div>
   )
