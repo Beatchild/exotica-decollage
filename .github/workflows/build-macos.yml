@@ -45,7 +45,7 @@ jobs:
           cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg "release/Exotica-Decollage-macOS.dmg"
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add release
+          git add -f release
           out=$(git commit -m "macOS build ${{ github.sha }} [skip ci]" 2>&1) || { echo "::error::commit failed: $out"; exit 1; }
           git checkout -- . # drop lockfile churn the build itself produced
           out=$(git pull --rebase origin main 2>&1) || { echo "::error::pull failed: $out"; exit 1; }
@@ -86,7 +86,7 @@ jobs:
           cp src-tauri/target/release/bundle/nsis/*.exe "release/Exotica-Decollage-Setup.exe"
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add release
+          git add -f release
           out=$(git commit -m "Windows build ${{ github.sha }} [skip ci]" 2>&1) || { echo "::error::commit failed: $out"; exit 1; }
           git checkout -- . # drop lockfile churn the build itself produced
           out=$(git pull --rebase origin main 2>&1) || { echo "::error::pull failed: $out"; exit 1; }
