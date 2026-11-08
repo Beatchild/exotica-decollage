@@ -1,4 +1,4 @@
-name: build-macos
+name: build-apps
 
 on:
   push:
@@ -43,6 +43,46 @@ jobs:
           cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg "release/Exotica-Decollage-macOS.dmg"
           git config user.name "github-actions"
           git config user.email "actions@github.com"
+          git pull --rebase
           git add release
           git commit -m "macOS build ${{ github.sha }} [skip ci]"
+          git push
+
+  build-windows:
+    runs-on: windows-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend deps
+        run: npm install
+
+      - name: Build Tauri app (NSIS installer)
+        run: npx tauri build
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Exotica-Decollage-Windows
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+      - name: Commit installer back to the repo
+        shell: bash
+        run: |
+          mkdir -p release
+          cp src-tauri/target/release/bundle/nsis/*.exe "release/Exotica-Decollage-Setup.exe"
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git pull --rebase
+          git add release
+          git commit -m "Windows build ${{ github.sha }} [skip ci]"
           git push

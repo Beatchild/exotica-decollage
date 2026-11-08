@@ -5,6 +5,7 @@ import {
 } from 'lucide-react'
 import { useAudioEngine } from './hooks/useAudioEngine'
 import { AudioVisualizer } from './components/AudioVisualizer'
+import { ArrangeView } from './components/ArrangeView'
 import { MixerRack } from './components/MixerRack'
 import { BUNDLED_STEMS } from './engine/stems'
 
@@ -562,8 +563,18 @@ export default function App() {
           onPreviewRegions={api.previewRegions}
           getPreviewPos={api.getPreviewPos}
           getPhraseInfo={api.getPhraseInfo}
+          onRegionArrange={(sourceIdx, regions) => {
+            let at = api.getArrPos()
+            for (const r of regions) {
+              api.arrAddClip(sourceIdx, r.start, r.dur, at, 0)
+              at += r.dur
+            }
+          }}
         />
       </main>
+
+      {/* DAW layer: multitrack arrangement */}
+      <ArrangeView api={api} />
 
       {/* mixer + macros */}
       <MixerRack api={api} />

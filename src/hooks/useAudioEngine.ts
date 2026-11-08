@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { engine } from '../engine/AudioEngine'
 import type { SourceRec } from '../engine/AudioEngine'
+import type { ArrClip, ArrTrack } from '../engine/Arranger'
 import { renderOffline, renderStems } from '../engine/OfflineRenderer'
 import { deleteCrate, exportCrateFile, importCrateFile, listCrates, loadCrate, saveCrate } from '../engine/Crates'
 import { renderSleevePng } from '../engine/SleevePng'
@@ -55,6 +56,12 @@ export interface EngineState {
   pings: number
   previewSource: number | null
   armedSliceId: number | null
+  arrClips: ArrClip[]
+  arrTracks: ArrTrack[]
+  arrPlaying: boolean
+  arrLoop: boolean
+  arrSnap: boolean
+  arrLen: number
   freezing: boolean
   seed: number
   sleevePalette: string[] | null
@@ -117,6 +124,12 @@ const snapshot = (f: Flags): EngineState => ({
   pings: engine.pings,
   previewSource: engine.previewSource,
   armedSliceId: engine.armedSliceId,
+  arrClips: engine.arranger.clips.map((c) => ({ ...c })),
+  arrTracks: engine.arranger.tracks.map((t) => ({ ...t })),
+  arrPlaying: engine.arranger.playing,
+  arrLoop: engine.arranger.loop,
+  arrSnap: engine.arranger.snap,
+  arrLen: engine.arranger.length(),
   freezing: f.freezing,
   seed: engine.seed,
   sleevePalette: engine.sleevePalette,
@@ -963,6 +976,81 @@ export function useAudioEngine() {
 
   const getPhraseInfo = useCallback(() => engine.phraseInfo(), [])
 
+  // ---------- arrangement (DAW layer) ----------
+  const getArrPos = useCallback(() => engine.arranger.playhead(), [])
+
+  const arrPlay = useCallback((from?: number) => {
+    engine.arranger.play(from)
+    sync()
+  }, [sync])
+
+  const arrStop = useCallback(() => {
+    engine.arranger.stop()
+    sync()
+  }, [sync])
+
+  const arrSeek = useCallback((t: number) => {
+    engine.arranger.seek(t)
+    sync()
+  }, [sync])
+
+  const arrToggleLoop = useCallback(() => {
+    engine.arranger.toggleLoop()
+    sync()
+  }, [sync])
+
+  const arrToggleSnap = useCallback(() => {
+    engine.arranger.snap = !engine.arranger.snap
+    sync()
+  }, [sync])
+
+  const arrAddClip = useCallback(
+    (sourceIdx: number, offset: number, dur: number, at?: number, track?: number) => {
+      engine.arranger.addClip(sourceIdx, offset, dur, at, track)
+      sync()
+    },
+    [sync],
+  )
+
+  const arrUpdateClip = useCallback((id: number, patch: Partial<ArrClip>) => {
+    engine.arranger.updateClip(id, patch)
+    sync()
+  }, [sync])
+
+  const arrRemoveClip = useCallback((id: number) => {
+    engine.arranger.removeClip(id)
+    sync()
+  }, [sync])
+
+  const arrDuplicateClip = useCallback((id: number) => {
+    engine.arranger.duplicateClip(id)
+    sync()
+  }, [sync])
+
+  const arrSetTrack = useCallback((i: number, patch: Partial<ArrTrack>) => {
+    engine.arranger.setTrack(i, patch)
+    sync()
+  }, [sync])
+
+  /** BOUNCE: one clean non-looped pass through the master, captured to WAV. */
+  const arrBounce = useCallback(() => {
+    if (engine.recorder?.recording || engine.arranger.length() <= 0) return
+    const wasLoop = engine.arranger.loop
+    engine.arranger.loop = false
+    engine.startRecording()
+    flags.current.recording = true
+    engine.arranger.onEnd = () => {
+      engine.arranger.onEnd = null
+      engine.arranger.loop = wasLoop
+      const blob = engine.stopRecording()
+      flags.current.recording = false
+      sync()
+      if (blob) downloadBlob(blob, `exotica-arrangement-${Date.now()}.wav`)
+    }
+    engine.arranger.play(0)
+    sync()
+  }, [sync])
+
   const regionSplice = useCallback(
     (sourceIdx: number, regions: Array<{ start: number; dur: number }>) => {
       engine.regionsToSpliced(sourceIdx, regions)
@@ -1076,6 +1164,18 @@ export function useAudioEngine() {
     previewRegions,
     getPreviewPos,
     getPhraseInfo,
+    getArrPos,
+    arrPlay,
+    arrStop,
+    arrSeek,
+    arrToggleLoop,
+    arrToggleSnap,
+    arrAddClip,
+    arrUpdateClip,
+    arrRemoveClip,
+    arrDuplicateClip,
+    arrSetTrack,
+    arrBounce,
     regionLoop,
     regionToSource,
     regionSplice,

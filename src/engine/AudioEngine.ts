@@ -1,4 +1,5 @@
 import * as Tone from 'tone'
+import { Arranger } from './Arranger'
 import { DSPChain } from './DSPChain'
 import { analyzeSource, buildSlices, detectBounds } from './Slicer'
 import type { SourceAnalysis } from './Slicer'
@@ -155,6 +156,14 @@ export class AudioEngine {
   private previewNodes: AudioBufferSourceNode[] = []
   private previewGain: GainNode | null = null
   private previewStartInfo: { ctxTime: number; parts: Array<{ start: number; dur: number }> } | null = null
+  /** DAW layer: multitrack clip timeline through the master chain */
+  readonly arranger = new Arranger(this)
+
+  /** The arrangement's entry point into the master chain (pre-DSP). */
+  arrangeBus(): GainNode | null {
+    return this.masterGain
+  }
+
   /** current phrase-loop cycle: when the running repeat started, and where */
   private phraseCycle: {
     start: number
@@ -508,6 +517,7 @@ export class AudioEngine {
     if (idx < 0 || idx >= this.sources.length) return
     this.sources.splice(idx, 1)
     this.phraseRegion = null
+    this.arranger.sourceRemoved(idx)
     // shift/drop mask indices referencing the removed source
     this.sourceMasks = this.sourceMasks.map((m) => {
       if (!m) return null

@@ -29,6 +29,7 @@ interface Props {
   onPreviewRegions: (sourceIdx: number, regions: Array<{ start: number; dur: number }>) => void
   getPreviewPos: () => { idx: number; sec: number } | null
   getPhraseInfo: () => { sourceIdx: number; start: number; dur: number; sec: number } | null
+  onRegionArrange: (sourceIdx: number, regions: Array<{ start: number; dur: number }>) => void
 }
 
 const peaksCache = new WeakMap<AudioBuffer, { key: string; peaks: Array<[number, number]> }>()
@@ -80,6 +81,7 @@ export function AudioVisualizer({
   onPreviewRegions,
   getPreviewPos,
   getPhraseInfo,
+  onRegionArrange,
 }: Props) {
   // mouse-selected waveform regions, in seconds of the selected source
   const [regions, setRegions] = useState<Array<{ a: number; b: number }>>([])
@@ -477,6 +479,16 @@ export function AudioVisualizer({
                 className="px-1.5 py-0.5 border border-charcoal/60 text-[9px] tracking-widest hover:bg-charcoal/10"
               >
                 → SOURCE{sortedRegions.length > 1 ? 'S' : ''}
+              </button>
+              <button
+                onClick={() => {
+                  onRegionArrange(sel, sortedRegions)
+                  setRegions([])
+                }}
+                title="Each selected region lands on the ARRANGE timeline as a clip, back to back at the playhead"
+                className="px-1.5 py-0.5 border border-charcoal/60 text-[9px] tracking-widest hover:bg-charcoal/10"
+              >
+                → ARRANGE
               </button>
               {sortedRegions.length > 1 && (
                 <button
