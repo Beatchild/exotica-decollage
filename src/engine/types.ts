@@ -40,7 +40,15 @@ export interface Slice {
   /** onset flux strength at slice start */
   attack: number
   category: SliceCategory
+  /** hand-picked in the timbre map: the composition draws on it (see pinMode) */
+  pinned?: boolean
 }
+
+/**
+ * How pinned slices steer the generative voices:
+ * all = ignore pins · favor = pinned slices 4× as likely · only = nothing else
+ */
+export type PinMode = 'all' | 'favor' | 'only'
 
 export interface VoiceParams {
   level: number // 0–1

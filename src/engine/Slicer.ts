@@ -23,15 +23,19 @@ export interface SourceAnalysis {
   duration: number
 }
 
-/** Mix an AudioBuffer down to a single Float32Array. */
-function monoMix(buffer: AudioBuffer): Float32Array {
-  const out = new Float32Array(buffer.length)
-  const scale = 1 / buffer.numberOfChannels
-  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
-    const data = buffer.getChannelData(ch)
+/** Mix channel data down to a single Float32Array. */
+function monoMix(channels: Float32Array[]): Float32Array {
+  const out = new Float32Array(channels[0]?.length ?? 0)
+  const scale = 1 / Math.max(1, channels.length)
+  for (const data of channels) {
     for (let i = 0; i < data.length; i++) out[i] += data[i] * scale
   }
   return out
+}
+
+/** Channel arrays of an AudioBuffer (views, not copies). */
+export function channelsOf(buffer: AudioBuffer): Float32Array[] {
+  return Array.from({ length: buffer.numberOfChannels }, (_, ch) => buffer.getChannelData(ch))
 }
 
 /**
@@ -41,8 +45,16 @@ function monoMix(buffer: AudioBuffer): Float32Array {
  * RMS-derivative term so energy-only onsets register too.
  */
 export function analyzeSource(buffer: AudioBuffer): SourceAnalysis {
-  const sampleRate = buffer.sampleRate
-  const mono = monoMix(buffer)
+  return analyzeChannels(channelsOf(buffer), buffer.sampleRate, buffer.duration)
+}
+
+/** Same as analyzeSource, from raw channel data (usable inside a Worker). */
+export function analyzeChannels(
+  channels: Float32Array[],
+  sampleRate: number,
+  duration: number,
+): SourceAnalysis {
+  const mono = monoMix(channels)
   Meyda.bufferSize = FRAME
   Meyda.sampleRate = sampleRate
   const frames: FrameFeatures[] = []
@@ -85,7 +97,7 @@ export function analyzeSource(buffer: AudioBuffer): SourceAnalysis {
     })
     prevSpec = spec ? new Float32Array(spec) : prevSpec
   }
-  return { mono, frames, sampleRate, duration: buffer.duration }
+  return { mono, frames, sampleRate, duration }
 }
 
 /** Adaptive-threshold peak picking over the novelty curve → boundary times (s). */
@@ -122,27 +134,41 @@ function estimatePitch(
   signal: Float32Array,
   sampleRate: number,
 ): { pitch: number | null; confidence: number } {
-  const N = Math.min(signal.length, 2048)
-  if (N < 512) return { pitch: null, confidence: 0 }
+  const N0 = Math.min(signal.length, 2048)
+  if (N0 < 512) return { pitch: null, confidence: 0 }
+  // 2× decimation (pair average) — 4× fewer multiply-adds; the 60–1000Hz
+  // search range sits far below the new Nyquist. Parabolic interpolation
+  // around the best lag restores sub-sample precision.
+  const N = N0 >> 1
+  const x = new Float32Array(N)
+  for (let i = 0; i < N; i++) x[i] = (signal[2 * i] + signal[2 * i + 1]) * 0.5
+  const sr = sampleRate / 2
   let energy = 0
-  for (let i = 0; i < N; i++) energy += signal[i] * signal[i]
+  for (let i = 0; i < N; i++) energy += x[i] * x[i]
   if (energy / N < 1e-6) return { pitch: null, confidence: 0 }
 
-  const minLag = Math.floor(sampleRate / 1000)
-  const maxLag = Math.min(Math.floor(sampleRate / 60), N - 1)
+  const minLag = Math.max(2, Math.floor(sr / 1000))
+  const maxLag = Math.min(Math.floor(sr / 60), N - 2)
+  const corrs = new Float32Array(maxLag + 2)
   let bestLag = -1
   let bestCorr = 0
-  for (let lag = minLag; lag <= maxLag; lag++) {
+  for (let lag = minLag - 1; lag <= maxLag + 1; lag++) {
     let corr = 0
-    for (let i = 0; i < N - lag; i++) corr += signal[i] * signal[i + lag]
+    for (let i = 0; i < N - lag; i++) corr += x[i] * x[i + lag]
     corr /= energy
-    if (corr > bestCorr) {
+    corrs[lag] = corr
+    if (lag >= minLag && lag <= maxLag && corr > bestCorr) {
       bestCorr = corr
       bestLag = lag
     }
   }
   if (bestLag < 0 || bestCorr < 0.3) return { pitch: null, confidence: bestCorr }
-  return { pitch: sampleRate / bestLag, confidence: bestCorr }
+  const a = corrs[bestLag - 1]
+  const b = corrs[bestLag]
+  const c = corrs[bestLag + 1]
+  const den = a - 2 * b + c
+  const shift = den < 0 ? Math.max(-0.5, Math.min(0.5, (0.5 * (a - c)) / den)) : 0
+  return { pitch: sr / (bestLag + shift), confidence: bestCorr }
 }
 
 function categorize(s: Omit<Slice, 'category' | 'id' | 'sourceIdx'>, attackRef: number): SliceCategory {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { EngineApi } from '../hooks/useAudioEngine'
+import { hasSlices, readSliceIds } from '../ui/dnd'
 
 const CHARCOAL = '#1A1A1A'
 const BURNT = '#D35400'
@@ -24,6 +25,7 @@ export function ArrangeView({ api }: { api: EngineApi }) {
   const [pxSec, setPxSec] = useState(14)
   const [scrollX, setScrollX] = useState(0)
   const [selClip, setSelClip] = useState<number | null>(null)
+  const [dropHover, setDropHover] = useState(false)
   const dragRef = useRef<Drag | null>(null)
 
   const clipsRef = useRef(state.arrClips)
@@ -397,7 +399,36 @@ export function ArrangeView({ api }: { api: EngineApi }) {
             ref={canvasRef}
             className="absolute inset-0 w-full h-full cursor-crosshair"
             onMouseDown={onDown}
+            onDragOver={(e) => {
+              if (!hasSlices(e.dataTransfer)) return
+              e.preventDefault()
+              e.dataTransfer.dropEffect = 'copy'
+              if (!dropHover) setDropHover(true)
+            }}
+            onDragLeave={() => setDropHover(false)}
+            onDrop={(e) => {
+              if (!hasSlices(e.dataTransfer)) return
+              e.preventDefault()
+              e.stopPropagation()
+              setDropHover(false)
+              const rect = e.currentTarget.getBoundingClientRect()
+              const row = Math.max(0, Math.min(3, Math.floor((e.clientY - rect.top - RULER) / ROW_H)))
+              let at = snapT(xToT(e.clientX - rect.left))
+              // several dots land end to end, in the order they were pinned/dragged
+              for (const id of readSliceIds(e.dataTransfer)) {
+                const s = state.slices[id]
+                if (!s) continue
+                arrAddClip(s.sourceIdx, s.start, s.duration, at, row)
+                at += s.duration
+              }
+            }}
           />
+          {dropHover && (
+            <div className="absolute inset-0 pointer-events-none border-2 border-dashed flex items-center justify-center text-[10px] tracking-[0.3em]"
+              style={{ borderColor: BURNT, color: BURNT, background: 'rgba(211,84,0,0.06)' }}>
+              DROP ON A TRACK ROW
+            </div>
+          )}
         </div>
       </div>
 

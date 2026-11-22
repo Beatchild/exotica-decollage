@@ -53,3 +53,8 @@ input[type="range"]::-moz-range-thumb {
   background: var(--color-charcoal);
   border: none;
 }
+
+/* COMPOSE · SIMPLE mode hides the advanced controls */
+.hide-adv [data-adv] {
+  display: none !important;
+}

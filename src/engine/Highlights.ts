@@ -92,13 +92,19 @@ export function extractHighlights(
   buffer: AudioBuffer,
   count = 3,
   precomputed?: SourceAnalysis,
+  /** filled with where each window sits in the output and in the original */
+  segsOut?: Array<{ at: number; len: number; srcStart: number }>,
 ): AudioBuffer {
   count = Math.max(1, Math.min(3, count))
-  if (buffer.duration <= WINDOW_SEC * count + 2) return buffer
+  const whole = () => {
+    segsOut?.push({ at: 0, len: buffer.duration, srcStart: 0 })
+    return buffer
+  }
+  if (buffer.duration <= WINDOW_SEC * count + 2) return whole()
 
   const a = precomputed ?? analyzeSource(buffer)
   const wins = analyzeWindows(a)
-  if (wins.length === 0) return buffer
+  if (wins.length === 0) return whole()
   const score = roleScorers(wins)
   const winFrames = wins[0].frames
 
@@ -111,8 +117,11 @@ export function extractHighlights(
     )
     if (pick) chosen.push(pick)
   }
-  if (chosen.length === 0) return buffer
+  if (chosen.length === 0) return whole()
   chosen.sort((x, y) => x.startFrame - y.startFrame)
+  chosen.forEach((w, k) =>
+    segsOut?.push({ at: k * WINDOW_SEC, len: WINDOW_SEC, srcStart: (w.startFrame * 512) / buffer.sampleRate }),
+  )
 
   const segLen = Math.floor(WINDOW_SEC * buffer.sampleRate)
   const fade = Math.floor(FADE_SEC * buffer.sampleRate)

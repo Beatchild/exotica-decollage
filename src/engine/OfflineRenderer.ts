@@ -3,8 +3,16 @@ import type { HarmCtx } from './generate'
 import { chordAt, chordCorrection, makeProgression } from './Harmony'
 import type { Motif } from './Harmony'
 import { mulberry32 } from './rng'
+import { eraChain, startEraSurfaces } from './eras'
+import { LAYERS_OFF, layersActive, memoryLanes, prepareStretches, sectionIndexAt, sectionSpanAt } from './memoryLayers'
+import type { MemoryLayerParams } from './memoryLayers'
+import type { MixBus } from './AudioEngine'
+import { isMemoryForm } from './memory'
+import type { MasterChain } from './mastering'
 import { renderSurfaceNoise } from './stems'
-import { encodeWav } from './WavRecorder'
+import { masterAsync } from './masterAsync'
+import type { WavFormat } from './WavRecorder'
+import type { LoudnessReport } from './loudness'
 import { applyGrainEnvelope, poolFrom, realizePing } from './AudioEngine'
 import type { AudioEngine } from './AudioEngine'
 import { NOISE_VOICE, NUM_VOICES } from './types'
@@ -24,6 +32,47 @@ export interface RenderOpts {
   duck?: boolean
   /** restrict all voices to these source indices (e.g. only YT collages) */
   sourceFilter?: number[]
+  /** 0..1 as the render advances */
+  onProgress?: (fraction: number) => void
+  /** loudness normalization of the final master */
+  master?: MasterOpts
+  /** cancel: the render rejects with an AbortError within one 5s chunk */
+  signal?: AbortSignal
+  /** output sample rate (default: the live context's, usually 48000) */
+  sampleRate?: number
+  /** bit depth + metadata of the WAV */
+  format?: WavFormat
+  /** which parts of which sources this render actually played */
+  onUsage?: (usage: SourceUsage[]) => void
+  /** render one MIX bus alone (memory-layer stems) */
+  soloBus?: MixBus
+}
+
+/** Provenance: the stretches of one pool source a render played from. */
+export interface SourceUsage {
+  sourceIdx: number
+  name: string
+  /** number of sample events drawn from this source */
+  events: number
+  /** merged [start, end] seconds inside the source buffer */
+  ranges: Array<[number, number]>
+}
+
+export interface RawRender {
+  L: Float32Array
+  R: Float32Array
+  sampleRate: number
+  usage: SourceUsage[]
+}
+
+export interface MasterOpts {
+  /** integrated loudness target, e.g. −14 LUFS; null/undefined = measure only */
+  targetLufs?: number | null
+  /** true-peak ceiling in dBTP (default −1) */
+  ceilingDb?: number
+  /** release chain applied before loudness (MASTER section) */
+  chain?: MasterChain
+  onReport?: (r: { before: LoudnessReport; after: LoudnessReport; crc: number }) => void
 }
 
 interface TimelineState {
@@ -99,11 +148,29 @@ export async function renderOffline(
   minutes: number,
   opts: RenderOpts = {},
 ): Promise<Blob> {
-  const sampleRate = engine.ctx?.sampleRate ?? 48000
+  const raw = await renderRaw(engine, minutes, opts)
+  opts.onUsage?.(raw.usage)
+  return finishMaster(raw.L, raw.R, raw.sampleRate, opts.master, opts.signal, opts.format)
+}
+
+/** The render itself, before loudness/encoding — float channels + provenance. */
+export async function renderRaw(
+  engine: AudioEngine,
+  minutes: number,
+  opts: RenderOpts = {},
+): Promise<RawRender> {
+  const sampleRate = opts.sampleRate ?? engine.ctx?.sampleRate ?? 48000
   const loopSec = opts.loopBars ? (opts.loopBars * 4 * 60) / engine.bpm : null
   const tailSec = loopSec ? 3 : 0
   // 45min cap: beyond that the float render buffer alone tops 1GB
   const seconds = loopSec ? loopSec + tailSec : Math.max(10, Math.min(45 * 60, minutes * 60))
+  // memory layers: the stretch clouds must exist before the bounce starts
+  // a bus stem (CLOUDS / MELODY / GHOSTS / LOOP / SURFACE) plays that bus alone
+  const soloBus = opts.soloBus ?? null
+  const ml = soloBus ? soloLayers(engine.memLayers, soloBus) : engine.memLayers
+  const layersOn = !loopSec && (opts.soloVoice ?? null) === null && layersActive(ml)
+  if (layersOn && ml.stretch > 0.02) await prepareStretches(engine.slices, engine.sources)
+  throwIfAborted(opts.signal)
   const ctx = new OfflineAudioContext(2, Math.ceil(seconds * sampleRate), sampleRate)
   const { voices, telephony, crush } = engine
   const seed = opts.seed ?? engine.seed
@@ -367,15 +434,23 @@ export async function renderOffline(
 
   // ---------- voice buses ----------
   const solo = opts.soloVoice ?? null
+  // MIX: the generative voices share one fader (dry + reverb send)
+  const voicesDry = ctx.createGain()
+  voicesDry.gain.value = engine.mix.voices
+  voicesDry.connect(input)
+  const voicesSend = ctx.createGain()
+  voicesSend.gain.value = engine.mix.voices
+  voicesSend.connect(revSend)
   const duckGain = ctx.createGain() // voice 0 sidechain target
-  duckGain.connect(input)
+  duckGain.connect(voicesDry)
   const anySolo = voices.some((v) => v.solo)
   const voiceGains: GainNode[] = []
   const sendGains: GainNode[] = []
   const audibleAt = (vi: number, t: number) => {
     if (solo !== null && vi !== solo) return 0
     const v = stateAt(t).voices[vi] ?? voices[vi]
-    const on = !voices[vi].mute && (!anySolo || voices[vi].solo)
+    // a song section's own mute wins (the timeline carries each scene's voices)
+    const on = !v.mute && (!anySolo || voices[vi].solo)
     if (!on) return 0
     return vi === NOISE_VOICE ? v.level * (0.25 + stateAt(t).macros.tapeAging * 0.75) : v.level
   }
@@ -389,8 +464,8 @@ export async function renderOffline(
       g.gain.setValueAtTime(lvl, at)
       s.gain.setValueAtTime(lvl * (stateAt(at).voices[i]?.reverbSend ?? voices[i].reverbSend), at)
     }
-    g.connect(i === 0 ? duckGain : input)
-    s.connect(revSend)
+    g.connect(i === 0 ? duckGain : voicesDry)
+    s.connect(voicesSend)
     voiceGains.push(g)
     sendGains.push(s)
   }
@@ -414,11 +489,26 @@ export async function renderOffline(
     return rev
   }
 
+  // provenance: which stretches of which sources get played
+  const used = new Map<number, { events: number; ranges: Array<[number, number]> }>()
+  const markUsed = (sourceIdx: number, from: number, to: number) => {
+    let u = used.get(sourceIdx)
+    if (!u) used.set(sourceIdx, (u = { events: 0, ranges: [] }))
+    u.events++
+    u.ranges.push([from, to])
+  }
+
+  const eraRng = mulberry32(seed + 8191)
   const realize = (ev: SliceEvent, when: number) => {
     const slice = engine.slices[ev.sliceId]
     if (!slice) return
     const buffer = engine.sources[slice.sourceIdx]?.buffer
     if (!buffer) return
+    {
+      const from = slice.start + (ev.grainOffset ?? 0)
+      const len = ev.micro ? ev.micro.loopDur : (ev.grainDur ?? slice.duration)
+      markUsed(slice.sourceIdx, from, Math.min(buffer.duration, from + len))
+    }
     const chordNow = ev.noCorrect ? null : chordAtT(when)
     const rate =
       ev.rate * (chordNow ? chordCorrection(slice.pitch, slice.pitchConfidence, chordNow) : 1)
@@ -444,6 +534,8 @@ export async function renderOffline(
       head.connect(bp)
       head = bp
     }
+    const era = engine.sources[slice.sourceIdx]?.era
+    if (era && era !== 'none') head = eraChain(ctx, head, src, era, eraRng, when)
     const panner = ctx.createStereoPanner()
     panner.pan.value = ev.pan
     head.connect(env)
@@ -475,11 +567,16 @@ export async function renderOffline(
   }
 
   // ---------- schedule all voices from fresh seeded streams ----------
+  // Each voice is a generator that schedules one step and yields its next
+  // start time. Scheduling happens in windows while the OfflineAudioContext
+  // is suspended, so a 20-minute render never builds hundreds of thousands
+  // of nodes up front (which froze the UI and ballooned memory).
   const rngs = Array.from({ length: NUM_VOICES }, (_, i) => mulberry32(seed + i * 7919))
-  const want = (vi: number) => solo === null || solo === vi
+  const want = (vi: number) => soloBus === null && (solo === null || solo === vi)
+  const lanes: Array<Generator<number, void, void>> = []
 
   // loop-lock: tile a captured cell verbatim, recapturing at block boundaries
-  const tileLooped = (voice: number, start: number) => {
+  function* tileLooped(voice: number, start: number): Generator<number, void, void> {
     let t = start
     let cell = engine.captureCell(voice, rngs[voice])
     let blockEnd = engine.blockSec > 0 ? engine.blockSec : Infinity
@@ -489,89 +586,102 @@ export async function renderOffline(
         blockEnd += engine.blockSec
       }
       for (const ev of cell.events) if (t + ev.t < seconds) realize(ev, t + ev.t)
-      t += cell.dur
+      t += Math.max(0.05, cell.dur)
+      yield t
     }
   }
 
   if (want(0)) {
     if (engine.phraseMode) {
-      // PHRASE mirror: verbatim loop, re-picked at block boundaries
-      let region = engine.phraseRegion ?? engine.pickPhraseRegion(rngs[0], false)
-      let blockEnd = engine.blockSec > 0 ? engine.blockSec : Infinity
-      let tp = 0.1
-      while (tp < seconds && region) {
-        if (tp >= blockEnd) {
-          region = engine.pickPhraseRegion(rngs[0], false) ?? region
-          blockEnd += engine.blockSec
+      lanes.push((function* () {
+        // PHRASE mirror: verbatim loop, re-picked at block boundaries
+        let region = engine.phraseRegion ?? engine.pickPhraseRegion(rngs[0], false)
+        let blockEnd = engine.blockSec > 0 ? engine.blockSec : Infinity
+        let tp = 0.1
+        while (tp < seconds && region) {
+          if (tp >= blockEnd) {
+            region = engine.pickPhraseRegion(rngs[0], false) ?? region
+            blockEnd += engine.blockSec
+          }
+          const ev = engine.phraseEventFor(region)
+          if (ev) realize(ev, tp)
+          tp += Math.max(0.3, region.dur - 0.08)
+          yield tp
         }
-        const ev = engine.phraseEventFor(region)
-        if (ev) realize(ev, tp)
-        tp += Math.max(0.3, region.dur - 0.08)
-      }
-    } else if (engine.looped) tileLooped(0, 0.1)
+      })())
+    } else if (engine.looped) lanes.push(tileLooped(0, 0.1))
     else {
-      let t1 = 0.1
-      while (t1 < seconds) {
-        const st = stateAt(t1)
-        const { events, cycleDur, sliceChroma, padSemis } = genV1Cycle(
-          pool(0, 'harmonic'), st.voices[0], st.macros, st.scale, rngs[0], engine.tape,
-          harmAt(t1), engine.fragK, engine.reverseProb,
-        )
-        harmPrevChroma = sliceChroma
-        if (padSemis) harmPadPrev = padSemis
-        for (const ev of events) if (t1 + ev.t < seconds) realize(ev, t1 + ev.t)
-        t1 += Math.max(1, cycleDur - 0.6) // slight overlap: slice changes crossfade
-      }
+      lanes.push((function* () {
+        let t1 = 0.1
+        while (t1 < seconds) {
+          const st = stateAt(t1)
+          const { events, cycleDur, sliceChroma, padSemis } = genV1Cycle(
+            pool(0, 'harmonic'), st.voices[0], st.macros, st.scale, rngs[0], engine.tape,
+            harmAt(t1), engine.fragK, engine.reverseProb,
+          )
+          harmPrevChroma = sliceChroma
+          if (padSemis) harmPadPrev = padSemis
+          for (const ev of events) if (t1 + ev.t < seconds) realize(ev, t1 + ev.t)
+          t1 += Math.max(1, cycleDur - 0.6) // slight overlap: slice changes crossfade
+          yield t1
+        }
+      })())
     }
   }
 
   // voice 2 events always generated when duck is on (they shape voice 0),
   // but only made audible when wanted
   if (engine.looped && want(1)) {
-    tileLooped(1, 0.1)
+    lanes.push(tileLooped(1, 0.1))
   } else if (want(1) || (duck && want(0))) {
-    let t2 = 0.1
-    let markov = -1
-    let step = 0
-    let swingOff = 0
-    while (t2 < seconds) {
-      const st = stateAt(t2)
-      const { event, dt, idx } = genV2Step(
-        pool(1, 'transient'), st.voices[1], st.macros, st.bpm, markov, rngs[1],
-      )
-      markov = idx
-      const at = t2 + swingOff
-      if (want(1)) realize(event, at)
-      else if (duck) {
-        // schedule only the duck envelope
-        const g = duckGain.gain
-        g.setValueAtTime(1, at)
-        g.linearRampToValueAtTime(0.35, at + 0.03)
-        g.setTargetAtTime(1, at + 0.12, 0.3)
+    lanes.push((function* () {
+      let t2 = 0.1
+      let markov = -1
+      let step = 0
+      let swingOff = 0
+      while (t2 < seconds) {
+        const st = stateAt(t2)
+        const { event, dt, idx } = genV2Step(
+          pool(1, 'transient'), st.voices[1], st.macros, st.bpm, markov, rngs[1],
+        )
+        markov = idx
+        const at = t2 + swingOff
+        if (want(1)) realize(event, at)
+        else if (duck) {
+          // schedule only the duck envelope
+          const g = duckGain.gain
+          g.setValueAtTime(1, at)
+          g.linearRampToValueAtTime(0.35, at + 0.03)
+          g.setTargetAtTime(1, at + 0.12, 0.3)
+        }
+        if (groove) {
+          const g = grooveNext(step, st.voices[1].density, st.bpm)
+          step = g.step
+          swingOff = g.swing
+          t2 += g.dtGrid
+        } else {
+          swingOff = 0
+          t2 += dt
+        }
+        yield t2
       }
-      if (groove) {
-        const g = grooveNext(step, st.voices[1].density, st.bpm)
-        step = g.step
-        swingOff = g.swing
-        t2 += g.dtGrid
-      } else {
-        swingOff = 0
-        t2 += dt
-      }
-    }
+    })())
   }
 
   if (want(2)) {
-    if (engine.looped) tileLooped(2, 0.5)
+    if (engine.looped) lanes.push(tileLooped(2, 0.5))
     else {
-      let t3 = 0.5
-      while (t3 < seconds) {
-        const st = stateAt(t3)
-        const pool3 = [...pool(2, 'texture'), ...pool(2, 'harmonic')]
-        const { event, dt } = genV3Step(pool3, st.voices[2], rngs[2], engine.tape, harmAt(t3))
-        realize(event, t3)
-        t3 += dt
-      }
+      lanes.push((function* () {
+        let t3 = 0.5
+        while (t3 < seconds) {
+          const st = stateAt(t3)
+          const pool3 = [...pool(2, 'texture'), ...pool(2, 'harmonic')]
+          const { event, dt } = genV3Step(pool3, st.voices[2], rngs[2], engine.tape, harmAt(t3))
+          realize(event, t3)
+          t3 += dt
+          yield t3
+        }
+      })())
     }
   }
 
@@ -586,40 +696,46 @@ export async function renderOffline(
   }
 
   if (want(4)) {
-    if (engine.looped) tileLooped(4, 0.3)
+    if (engine.looped) lanes.push(tileLooped(4, 0.3))
     else {
-      let t5 = 0.3
-      while (t5 < seconds) {
-        const st = stateAt(t5)
-        const pool5 = [...pool(4, 'transient'), ...pool(4, 'harmonic')]
-        const { events, dt } = genV5Cell(pool5, st.voices[4], st.macros, st.scale, rngs[4], harmAt(t5), engine.fragK)
-        for (const ev of events) if (t5 + ev.t < seconds) realize(ev, t5 + ev.t)
-        t5 += dt
-      }
+      lanes.push((function* () {
+        let t5 = 0.3
+        while (t5 < seconds) {
+          const st = stateAt(t5)
+          const pool5 = [...pool(4, 'transient'), ...pool(4, 'harmonic')]
+          const { events, dt } = genV5Cell(pool5, st.voices[4], st.macros, st.scale, rngs[4], harmAt(t5), engine.fragK)
+          for (const ev of events) if (t5 + ev.t < seconds) realize(ev, t5 + ev.t)
+          t5 += dt
+          yield t5
+        }
+      })())
     }
   }
 
   // voice 7 — melody: motif phrases (needs the chord clock)
   if (want(6) && harmProg) {
-    if (engine.looped) tileLooped(6, 0.2)
+    if (engine.looped) lanes.push(tileLooped(6, 0.2))
     else {
-      let t7 = 0.2
-      let motif: Motif | null = null
-      while (t7 < seconds) {
-        const st = stateAt(t7)
-        const harm = harmAt(t7)!
-        const { events, dur, motif: m } = genV7Phrase(
-          pool(6, 'harmonic'), st.voices[6] ?? voices[6], harm, st.bpm, rngs[6], motif,
-        )
-        motif = m
-        for (const ev of events) if (t7 + ev.t < seconds) realize(ev, t7 + ev.t)
-        t7 += dur
-      }
+      lanes.push((function* () {
+        let t7 = 0.2
+        let motif: Motif | null = null
+        while (t7 < seconds) {
+          const st = stateAt(t7)
+          const harm = harmAt(t7)!
+          const { events, dur, motif: m } = genV7Phrase(
+            pool(6, 'harmonic'), st.voices[6] ?? voices[6], harm, st.bpm, rngs[6], motif,
+          )
+          motif = m
+          for (const ev of events) if (t7 + ev.t < seconds) realize(ev, t7 + ev.t)
+          t7 += dur
+          yield t7
+        }
+      })())
     }
   }
 
   // voice 6 — sub pulse on the beat grid
-  if (want(5)) {
+  if (want(5)) lanes.push((function* () {
     let tb = 0.1
     while (tb < seconds) {
       const st = stateAt(tb)
@@ -646,18 +762,19 @@ export async function renderOffline(
         osc.stop(tb + 0.5)
       }
       tb += 60 / st.bpm
+      yield tb
     }
-  }
+  })())
 
   // V8 pings — FM chimes obeying the chord clock (full mix only, not stems)
-  if (engine.pings > 0 && solo === null) {
+  if (engine.pings > 0 && solo === null && soloBus === null) lanes.push((function* () {
     const rngP = mulberry32(seed + NUM_VOICES * 7919)
     const pingBus = ctx.createGain()
     pingBus.gain.value = 1
-    pingBus.connect(input)
+    pingBus.connect(voicesDry)
     const pingSendG = ctx.createGain()
     pingSendG.gain.value = engine.pings * 0.5
-    pingSendG.connect(revSend)
+    pingSendG.connect(voicesSend)
     let tp = 0.5 + rngP() * 3
     while (tp < seconds) {
       const chord = chordAtT(tp)
@@ -669,8 +786,9 @@ export async function renderOffline(
         261.63 * Math.pow(2, pc / 12) * mult, 0.35 + engine.pings * 0.4, rngP,
       )
       tp += (1.2 + rngP() * 6) / (0.35 + engine.pings)
+      yield tp
     }
-  }
+  })())
 
   // ambience beds: flagged sources loop continuously, heavily filtered
   const beds = engine.sources.filter((s) => s.bed)
@@ -681,6 +799,7 @@ export async function renderOffline(
     bedLP.Q.value = 0.5
     bedLP.connect(voiceGains[NOISE_VOICE])
     for (const bed of beds) {
+      markUsed(engine.sources.indexOf(bed), 0, bed.buffer.duration)
       const src = ctx.createBufferSource()
       src.buffer = bed.buffer
       src.loop = true
@@ -744,19 +863,94 @@ export async function renderOffline(
     }
   }
 
-  let rendered = await ctx.startRendering()
+  // ---------- windowed scheduling driven by render suspends ----------
+  // MEMORY WEAVE: media surfaces and the memory layers (full mix only)
+  if (solo === null && !loopSec) {
+    const bus = (k: MixBus) => {
+      const dry = ctx.createGain()
+      dry.gain.value = soloBus === null || soloBus === k ? engine.mix[k] : 0
+      dry.connect(input)
+      const send = ctx.createGain()
+      send.gain.value = dry.gain.value
+      send.connect(revSend)
+      return { dry, send }
+    }
+    const buses = { clouds: bus('clouds'), melody: bus('melody'), ghosts: bus('ghosts'), loop: bus('loop') }
+    const eras = engine.sources.filter((x) => !x.bed).map((x) => x.era ?? 'none')
+    if (soloBus === null || soloBus === 'surface') startEraSurfaces(ctx, bus('surface').dry, eras, 0, seed)
+    if (layersOn) {
+      const form = isMemoryForm(engine)
+      lanes.push(...memoryLanes({
+        ctx,
+        buses,
+        start: 0,
+        end: seconds,
+        seed,
+        params: ml,
+        keyRoot: engine.keyRoot,
+        slices: engine.slices,
+        sources: engine.sources,
+        chordAt: chordAtT,
+        sectionAt: (w) => (form ? sectionIndexAt(engine.songSections, w) : -1),
+        sectionSpan: (w) => (form ? sectionSpanAt(engine.songSections, w) : null),
+        markUsed,
+      }))
+    }
+  }
+
+  const laneT = lanes.map(() => 0)
+  const laneDone = lanes.map(() => false)
+  const fillUntil = (limit: number) => {
+    for (let i = 0; i < lanes.length; i++) {
+      // guard against a generator that stops advancing time
+      let guard = 0
+      while (!laneDone[i] && laneT[i] < limit && guard++ < 100000) {
+        const r = lanes[i].next()
+        if (r.done) laneDone[i] = true
+        else laneT[i] = Math.max(laneT[i], r.value)
+      }
+    }
+  }
+  const progress = opts.onProgress
+  const signal = opts.signal
+  // 5s chunks: cheap suspend round-trips, and a STOP lands within one chunk
+  const STEP = 5
+  const AHEAD = 8
+  fillUntil(AHEAD)
+  const armSuspend = (at: number) => {
+    if (at >= seconds - 0.5) return
+    ctx.suspend(at).then(() => {
+      if (signal?.aborted) {
+        // cancelled: leave the context suspended forever (no more CPU spent
+        // on reverb/LFO tails), cut the output, let GC take it
+        holeGain.disconnect()
+        return
+      }
+      fillUntil(at + AHEAD)
+      progress?.(at / seconds)
+      armSuspend(at + STEP)
+      void ctx.resume()
+    }, () => void ctx.resume())
+  }
+  armSuspend(STEP)
+
+  let rendered = await abortable(ctx.startRendering(), signal)
+  progress?.(1)
 
   // parallel sub-octave layer: granular −12st resample of the finished master,
   // mixed back in (second offline pass mirrors the live Tone.PitchShift bus)
   if (engine.sub > 0.01) {
-    rendered = await applySubOctave(rendered, engine.sub, sampleRate)
+    rendered = await abortable(applySubOctave(rendered, engine.sub, sampleRate), signal)
   }
+  throwIfAborted(signal)
 
+  let L: Float32Array
+  let R: Float32Array
   if (loopSec) {
     // fold the tail back onto the start so reverb/delay wrap seamlessly
     const loopLen = Math.floor(loopSec * sampleRate)
-    const L = new Float32Array(loopLen)
-    const R = new Float32Array(loopLen)
+    L = new Float32Array(loopLen)
+    R = new Float32Array(loopLen)
     for (let ch = 0; ch < 2; ch++) {
       const src = rendered.getChannelData(ch)
       const dst = ch === 0 ? L : R
@@ -765,19 +959,116 @@ export async function renderOffline(
         dst[i - loopLen] += src[i]
       }
     }
-    return encodeWav(L, R, sampleRate)
+  } else {
+    L = rendered.getChannelData(0)
+    R = rendered.getChannelData(1)
   }
 
-  return encodeWav(rendered.getChannelData(0), rendered.getChannelData(1), sampleRate)
+  // merge overlapping / near-touching stretches (≤0.25s apart)
+  const usage: SourceUsage[] = [...used.entries()]
+    .filter(([i]) => i >= 0 && engine.sources[i])
+    .map(([i, u]) => {
+      const sorted = u.ranges.sort((a, b) => a[0] - b[0])
+      const merged: Array<[number, number]> = []
+      for (const [a, b] of sorted) {
+        const last = merged[merged.length - 1]
+        if (last && a <= last[1] + 0.25) last[1] = Math.max(last[1], b)
+        else merged.push([a, b])
+      }
+      return { sourceIdx: i, name: engine.sources[i].name, events: u.events, ranges: merged }
+    })
+    .sort((a, b) => b.events - a.events)
+
+  return { L, R, sampleRate, usage }
 }
 
-/** Per-voice stems: N deterministic renders sharing the same seed streams. */
-export async function renderStems(engine: AudioEngine, minutes: number): Promise<Blob[]> {
+/** True for the error a cancelled render rejects with. */
+export function isAbort(e: unknown): boolean {
+  return e instanceof DOMException && e.name === 'AbortError'
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) throw new DOMException('Render cancelled', 'AbortError')
+}
+
+/** Reject as soon as `signal` aborts, without waiting for `p`. */
+function abortable<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return p
+  throwIfAborted(signal)
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException('Render cancelled', 'AbortError'))
+    signal.addEventListener('abort', onAbort, { once: true })
+    p.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+  })
+}
+
+/**
+ * Loudness pass + WAV encode. Measures integrated LUFS (BS.1770-4); with a
+ * target, applies gain and a true-peak-safe limiter, then re-measures.
+ */
+export async function finishMaster(
+  L: Float32Array,
+  R: Float32Array,
+  sampleRate: number,
+  master?: MasterOpts,
+  signal?: AbortSignal,
+  format?: WavFormat,
+): Promise<Blob> {
+  throwIfAborted(signal)
+  const { wav, crc, before, after } = await masterAsync(
+    L, R, sampleRate, master?.targetLufs ?? null, master?.ceilingDb ?? -1, signal, format, master?.chain,
+  )
+  master?.onReport?.({ before, after, crc })
+  return wav
+}
+
+/** Per-voice stems: N deterministic renders sharing the same seed streams.
+ * Stems are never loudness-normalized (they must sum like the mix). */
+export async function renderStems(
+  engine: AudioEngine,
+  minutes: number,
+  onProgress?: (f: number) => void,
+  signal?: AbortSignal,
+): Promise<Blob[]> {
   const stems: Blob[] = []
+  // memory-layer buses that actually sound get their own stems too
+  const buses = stemBuses(engine)
+  const total = NUM_VOICES + buses.length
   for (let v = 0; v < NUM_VOICES; v++) {
-    stems.push(await renderOffline(engine, minutes, { soloVoice: v }))
+    stems.push(await renderOffline(engine, minutes, {
+      soloVoice: v,
+      signal,
+      onProgress: (f) => onProgress?.((v + f) / total),
+    }))
+  }
+  for (let b = 0; b < buses.length; b++) {
+    stems.push(await renderOffline(engine, minutes, {
+      soloBus: buses[b],
+      signal,
+      onProgress: (f) => onProgress?.((NUM_VOICES + b + f) / total),
+    }))
   }
   return stems
+}
+
+/** Which MIX buses get a stem: the memory layers in use, and the eras' surface. */
+export function stemBuses(engine: AudioEngine): MixBus[] {
+  const ml = engine.memLayers
+  const out: MixBus[] = []
+  if (ml.stretch > 0.02) out.push('clouds')
+  if (ml.motif > 0.02) out.push('melody')
+  if (ml.ghosts > 0.02) out.push('ghosts')
+  if ((ml.loop ?? 0) > 0.02) out.push('loop')
+  if (engine.sources.some((x) => !x.bed && x.era && x.era !== 'none')) out.push('surface')
+  return out
+}
+
+/** Only the layer behind one bus (surface: none — it is the eras' noise). */
+function soloLayers(ml: MemoryLayerParams, bus: MixBus): MemoryLayerParams {
+  const only: Partial<MemoryLayerParams> =
+    bus === 'clouds' ? { stretch: ml.stretch } : bus === 'melody' ? { motif: ml.motif }
+      : bus === 'ghosts' ? { ghosts: ml.ghosts } : bus === 'loop' ? { loop: ml.loop } : {}
+  return { ...LAYERS_OFF, motifSeed: ml.motifSeed, ...only }
 }
 
 /** Granular octaver: overlapped 120ms grains read at half rate, position-synced. */
