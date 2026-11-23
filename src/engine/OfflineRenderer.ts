@@ -154,6 +154,9 @@ export async function renderOffline(
 }
 
 /** The render itself, before loudness/encoding — float channels + provenance. */
+/** share of the progress bar the offline bounce takes (the rest: sub-octave, then the caller's mastering) */
+const RENDER_SHARE = 0.93
+
 export async function renderRaw(
   engine: AudioEngine,
   minutes: number,
@@ -929,22 +932,23 @@ export async function renderRaw(
         return
       }
       fillUntil(at + AHEAD)
-      progress?.(at / seconds)
+      progress?.((at / seconds) * RENDER_SHARE)
       armSuspend(at + STEP)
       void ctx.resume()
     }, () => void ctx.resume())
   }
   armSuspend(STEP)
 
-  let rendered = await abortable(ctx.startRendering(), signal)
-  progress?.(1)
+  const rendered = await abortable(ctx.startRendering(), signal)
+  progress?.(RENDER_SHARE)
 
   // parallel sub-octave layer: granular −12st resample of the finished master,
-  // mixed back in (second offline pass mirrors the live Tone.PitchShift bus)
+  // mixed back in (mirrors the live Tone.PitchShift bus)
   if (engine.sub > 0.01) {
-    rendered = await abortable(applySubOctave(rendered, engine.sub, sampleRate), signal)
+    await addSubOctave(rendered, engine.sub, signal, (f) => progress?.(RENDER_SHARE + f * (1 - RENDER_SHARE)))
   }
   throwIfAborted(signal)
+  progress?.(1)
 
   let L: Float32Array
   let R: Float32Array
@@ -1075,42 +1079,63 @@ function soloLayers(ml: MemoryLayerParams, bus: MixBus): MemoryLayerParams {
 }
 
 /** Granular octaver: overlapped 120ms grains read at half rate, position-synced. */
-async function applySubOctave(
-  dry: AudioBuffer,
-  amount: number,
-  sampleRate: number,
-): Promise<AudioBuffer> {
-  const ctx = new OfflineAudioContext(2, dry.length, sampleRate)
-  const drySrc = ctx.createBufferSource()
-  drySrc.buffer = dry
-  drySrc.connect(ctx.destination)
-  drySrc.start(0)
-
-  const subGain = ctx.createGain()
-  subGain.gain.value = amount
-  const subLP = ctx.createBiquadFilter()
-  subLP.type = 'lowpass'
-  subLP.frequency.value = 2500
-  subGain.connect(subLP)
-  subLP.connect(ctx.destination)
-
-  const grain = 0.12
-  const hop = 0.06
-  const total = dry.duration
-  for (let t = 0; t < total - grain; t += hop) {
-    const src = ctx.createBufferSource()
-    src.buffer = dry
-    src.playbackRate.value = 0.5
-    const env = ctx.createGain()
-    env.gain.setValueAtTime(0, t)
-    env.gain.linearRampToValueAtTime(1, t + grain * 0.5)
-    env.gain.linearRampToValueAtTime(0, t + grain)
-    src.connect(env)
-    env.connect(subGain)
-    src.start(t, t, grain * 0.5 + 0.005)
-    src.stop(t + grain + 0.01)
+/**
+ * Sub-octave, in place: overlapping 120 ms grains (hop 60 ms, triangular
+ * windows that sum to 1) each read at half speed from where they start —
+ * one octave down, no time stretch — then low-passed at 2.5 kHz and mixed
+ * in at `amount`. A plain O(n) loop in ~2 s chunks with a yield between.
+ *
+ * (It used to be a second OfflineAudioContext with one source node per
+ * grain — ~2 000 nodes for 2 minutes, ~10 000 for ten — whose cost grew with
+ * nodes × length: long renders stalled at the end and never finished.)
+ */
+async function addSubOctave(buf: AudioBuffer, amount: number, signal?: AbortSignal, onProgress?: (f: number) => void) {
+  const sr = buf.sampleRate
+  const n = buf.length
+  const G = Math.round(0.12 * sr) // grain
+  const H = G >> 1 // hop: two grains overlap everywhere
+  // RBJ low-pass, 2.5 kHz, Q 0.707
+  const w0 = (2 * Math.PI * 2500) / sr
+  const al = Math.sin(w0) / (2 * Math.SQRT1_2)
+  const cw = Math.cos(w0)
+  const a0 = 1 + al
+  const b0 = (1 - cw) / 2 / a0
+  const b1 = (1 - cw) / a0
+  const b2 = b0
+  const a1 = (-2 * cw) / a0
+  const a2 = (1 - al) / a0
+  const CHUNK = sr * 2
+  for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+    const x = buf.getChannelData(ch)
+    const dry = new Float32Array(x) // read from the untouched signal
+    let x1 = 0, x2 = 0, y1 = 0, y2 = 0
+    for (let c0 = 0; c0 < n; c0 += CHUNK) {
+      const c1 = Math.min(n, c0 + CHUNK)
+      for (let i = c0; i < c1; i++) {
+        // the two grains covering sample i start at g0 (current hop) and g0 − H
+        const g0 = i - (i % H)
+        let v = 0
+        for (const g of [g0, g0 - H]) {
+          if (g < 0) continue
+          const k = i - g // 0 … G−1 within the grain
+          if (k >= G) continue
+          const w = k < H ? k / H : (G - k) / H // triangle: up over the first half, down over the second
+          const pos = g + k * 0.5 // half speed from the grain's own start
+          const j = pos | 0
+          const fr = pos - j
+          const s0 = dry[j] ?? 0
+          const s1 = dry[j + 1] ?? s0
+          v += w * (s0 + (s1 - s0) * fr)
+        }
+        const y = b0 * v + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+        x2 = x1; x1 = v; y2 = y1; y1 = y
+        x[i] = dry[i] + amount * y
+      }
+      onProgress?.((ch + c1 / n) / buf.numberOfChannels)
+      throwIfAborted(signal)
+      await new Promise<void>((r) => setTimeout(r, 0))
+    }
   }
-  return ctx.startRendering()
 }
 
 function makeImpulse(ctx: OfflineAudioContext, decay: number, sampleRate: number): AudioBuffer {
