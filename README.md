@@ -98,7 +98,16 @@ explicit gesture per browser autoplay policy), then **▶**.
   the pool) · PINNED ONLY (nothing else plays). Deterministic, so seeded
   renders still repeat; pins survive boundary edits / FRAG re-slicing by
   position. Dragging a dot (or DRAG ALL) onto an ARRANGE track places that
-  exact slice there, beat-snapped, several end to end.
+  exact slice there, beat-snapped, several end to end. Without dragging:
+  double-click a dot on the TIMBRE MAP (it is appended to the end of the
+  track picked with → ARRANGE T1–T4 in the map's header), or click T1–T4 on
+  the pin strip's ALL → ARRANGE to append every pinned dot. In the desktop
+  app the window's native file-drop is off (`dragDropEnabled: false`) so
+  these in-page drags reach the timeline.
+- **ARRANGE → RENDER WAV** — the arrangement offline, faster than real time:
+  its clips (track gain / pan / mute / solo, clip gain and fades) through the
+  same master chain, sub-octave and loudness mastering as RENDER, plus a 4 s
+  tail. BOUNCE still records one live real-time pass, unmastered.
 - **COMPOSE** (`ComposePanel.tsx`, `moods.ts`) — the short way to a sound:
   1 material (pins) · 2 mood (EERIE · MYTHIC · HAUNTED RITUAL · SUNKEN
   TEMPLE — whole desk settings for drones, ghosts, rituals) · 3 three knobs,

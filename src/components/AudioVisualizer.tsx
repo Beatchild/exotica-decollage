@@ -35,6 +35,8 @@ interface Props {
   onTogglePin?: (id: number) => void
   /** Alt+click: pin a dot and its closest timbral neighbours */
   onPinSimilar?: (id: number) => void
+  /** double-click: append the dot to an ARRANGE track (no drag needed) */
+  onSendToArrange?: (id: number, track: number) => void
 }
 
 const peaksCache = new WeakMap<AudioBuffer, { key: string; peaks: Array<[number, number]> }>()
@@ -89,7 +91,10 @@ export function AudioVisualizer({
   onRegionArrange,
   onTogglePin,
   onPinSimilar,
+  onSendToArrange,
 }: Props) {
+  // which ARRANGE track a double-clicked dot lands on
+  const [sendTrack, setSendTrack] = useState(0)
   // mouse-selected waveform regions, in seconds of the selected source
   const [regions, setRegions] = useState<Array<{ a: number; b: number }>>([])
   const regionsRef = useRef(regions)
@@ -576,9 +581,22 @@ export function AudioVisualizer({
       >
         <div className="px-3 py-1.5 text-[10px] tracking-[0.2em] border-b border-charcoal/30 flex justify-between">
           <span title="Pinned dots (double ring) are what the composition draws on — see COMPOSE">
-            TIMBRE MAP — CLICK: LISTEN · SHIFT-CLICK: PIN · ALT-CLICK: PIN + SIMILAR · DRAG: TO ARRANGE / PIN STRIP · RIGHT-CLICK: RECLASSIFY
+            TIMBRE MAP — CLICK: LISTEN · DOUBLE-CLICK: → ARRANGE · SHIFT-CLICK: PIN · ALT-CLICK: PIN + SIMILAR · DRAG: TO ARRANGE / PIN STRIP · RIGHT-CLICK: RECLASSIFY
           </span>
-          <span className="flex gap-3">
+          <span className="flex gap-3 items-center">
+            {onSendToArrange && (
+              <span className="flex items-center gap-0.5" title="Double-click a dot: it is appended to the end of this ARRANGE track">
+                <span className="opacity-60 mr-0.5">→ ARRANGE</span>
+                {[0, 1, 2, 3].map((t) => (
+                  <button key={t} onClick={() => setSendTrack(t)}
+                    className="px-1 border border-charcoal/50 text-[8px]"
+                    style={sendTrack === t ? { background: CHARCOAL, color: CREAM } : undefined}
+                    aria-pressed={sendTrack === t}>
+                    T{t + 1}
+                  </button>
+                ))}
+              </span>
+            )}
             <span style={{ color: BURNT }}>● TRANSIENT</span>
             <span style={{ color: CHARCOAL }}>● HARMONIC</span>
             <span style={{ color: '#8A7F72' }}>● TEXTURE</span>
@@ -619,6 +637,10 @@ export function AudioVisualizer({
               if (e.shiftKey && onTogglePin) onTogglePin(hit.id)
               else if (e.altKey && onPinSimilar) onPinSimilar(hit.id)
               else onAudition(hit.id)
+            }}
+            onDoubleClick={(e) => {
+              const hit = hitScatterPoint(e)
+              if (hit && onSendToArrange) onSendToArrange(hit.id, sendTrack)
             }}
             onContextMenu={(e) => {
               e.preventDefault()

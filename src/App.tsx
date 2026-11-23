@@ -609,6 +609,7 @@ export default function App() {
             getPhraseInfo={api.getPhraseInfo}
             onTogglePin={api.togglePin}
             onPinSimilar={api.pinSimilar}
+            onSendToArrange={(id, track) => api.arrAppendSlices([id], track)}
             onRegionArrange={(sourceIdx, regions) => {
               let at = api.getArrPos()
               for (const r of regions) {

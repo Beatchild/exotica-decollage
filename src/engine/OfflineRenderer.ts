@@ -15,6 +15,7 @@ import type { WavFormat } from './WavRecorder'
 import type { LoudnessReport } from './loudness'
 import { applyGrainEnvelope, poolFrom, realizePing } from './AudioEngine'
 import type { AudioEngine } from './AudioEngine'
+import type { ArrClip, ArrTrack } from './Arranger'
 import { NOISE_VOICE, NUM_VOICES } from './types'
 import type { MacroParams, Scene, Slice, SliceEvent, VoiceParams } from './types'
 
@@ -46,7 +47,15 @@ export interface RenderOpts {
   onUsage?: (usage: SourceUsage[]) => void
   /** render one MIX bus alone (memory-layer stems) */
   soloBus?: MixBus
+  /**
+   * ARRANGE render: play these timeline clips through the master chain
+   * instead of the generative voices (length = the arrangement + a tail).
+   */
+  arrangement?: { clips: ArrClip[]; tracks: ArrTrack[] }
 }
+
+/** reverb / delay tail kept after the last arrangement clip */
+const ARRANGE_TAIL = 4
 
 /** Provenance: the stretches of one pool source a render played from. */
 export interface SourceUsage {
@@ -166,12 +175,16 @@ export async function renderRaw(
   const loopSec = opts.loopBars ? (opts.loopBars * 4 * 60) / engine.bpm : null
   const tailSec = loopSec ? 3 : 0
   // 45min cap: beyond that the float render buffer alone tops 1GB
-  const seconds = loopSec ? loopSec + tailSec : Math.max(10, Math.min(45 * 60, minutes * 60))
+  const arr = opts.arrangement ?? null
+  const arrLen = arr ? arr.clips.reduce((m, c) => Math.max(m, c.at + c.dur), 0) : 0
+  const seconds = arr
+    ? Math.min(45 * 60, arrLen + ARRANGE_TAIL)
+    : loopSec ? loopSec + tailSec : Math.max(10, Math.min(45 * 60, minutes * 60))
   // memory layers: the stretch clouds must exist before the bounce starts
   // a bus stem (CLOUDS / MELODY / GHOSTS / LOOP / SURFACE) plays that bus alone
   const soloBus = opts.soloBus ?? null
   const ml = soloBus ? soloLayers(engine.memLayers, soloBus) : engine.memLayers
-  const layersOn = !loopSec && (opts.soloVoice ?? null) === null && layersActive(ml)
+  const layersOn = !arr && !loopSec && (opts.soloVoice ?? null) === null && layersActive(ml)
   if (layersOn && ml.stretch > 0.02) await prepareStretches(engine.slices, engine.sources)
   await ensureEraSurfaces(sampleRate, engine.sources.filter((x) => !x.bed).map((x) => x.era ?? 'none'))
   throwIfAborted(opts.signal)
@@ -576,7 +589,7 @@ export async function renderRaw(
   // is suspended, so a 20-minute render never builds hundreds of thousands
   // of nodes up front (which froze the UI and ballooned memory).
   const rngs = Array.from({ length: NUM_VOICES }, (_, i) => mulberry32(seed + i * 7919))
-  const want = (vi: number) => soloBus === null && (solo === null || solo === vi)
+  const want = (vi: number) => !arr && soloBus === null && (solo === null || solo === vi)
   const lanes: Array<Generator<number, void, void>> = []
 
   // loop-lock: tile a captured cell verbatim, recapturing at block boundaries
@@ -771,7 +784,7 @@ export async function renderRaw(
   })())
 
   // V8 pings — FM chimes obeying the chord clock (full mix only, not stems)
-  if (engine.pings > 0 && solo === null && soloBus === null) lanes.push((function* () {
+  if (engine.pings > 0 && !arr && solo === null && soloBus === null) lanes.push((function* () {
     const rngP = mulberry32(seed + NUM_VOICES * 7919)
     const pingBus = ctx.createGain()
     pingBus.gain.value = 1
@@ -867,9 +880,47 @@ export async function renderRaw(
     }
   }
 
+  // ARRANGE: the timeline's clips into the master input, like the live
+  // arrangement bus (pre-DSP) — per-track gain / pan / mute / solo, per-clip
+  // gain and linear fades, exactly as Arranger.play lays them out from 0
+  if (arr) {
+    const anySoloT = arr.tracks.some((t) => t.solo)
+    const trackIn = arr.tracks.map((t) => {
+      const g = ctx.createGain()
+      g.gain.value = !t.mute && (!anySoloT || t.solo) ? t.gain : 0
+      const p = ctx.createStereoPanner()
+      p.pan.value = t.pan
+      g.connect(p)
+      p.connect(input)
+      return g
+    })
+    for (const c of arr.clips) {
+      const src = engine.sources[c.sourceIdx]
+      const dest = trackIn[c.track]
+      if (!src || !dest || c.at >= seconds) continue
+      const when = c.at
+      const dur = Math.min(c.dur, seconds - when)
+      const node = ctx.createBufferSource()
+      node.buffer = src.buffer
+      const env = ctx.createGain()
+      const fiEnd = Math.min(c.fadeIn, c.dur)
+      const foStart = Math.max(fiEnd + 0.001, c.dur - c.fadeOut)
+      if (fiEnd > 0) {
+        env.gain.setValueAtTime(0, when)
+        env.gain.linearRampToValueAtTime(c.gain, when + fiEnd)
+      } else env.gain.setValueAtTime(c.gain, when)
+      env.gain.setValueAtTime(c.gain, when + foStart)
+      env.gain.linearRampToValueAtTime(0.0001, when + c.dur)
+      node.connect(env)
+      env.connect(dest)
+      node.start(when, c.offset, dur + 0.02)
+      markUsed(c.sourceIdx, c.offset, Math.min(src.buffer.duration, c.offset + c.dur))
+    }
+  }
+
   // ---------- windowed scheduling driven by render suspends ----------
   // MEMORY WEAVE: media surfaces and the memory layers (full mix only)
-  if (solo === null && !loopSec) {
+  if (solo === null && !loopSec && !arr) {
     const bus = (k: MixBus) => {
       const dry = ctx.createGain()
       dry.gain.value = soloBus === null || soloBus === k ? engine.mix[k] : 0

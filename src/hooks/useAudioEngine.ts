@@ -1361,6 +1361,34 @@ export function useAudioEngine() {
     [progressTo, runJob],
   )
 
+  /**
+   * ARRANGE → WAV, offline: the timeline's clips through the same master
+   * chain and loudness mastering as RENDER, faster than real time (BOUNCE
+   * instead records one live pass).
+   */
+  const renderArrangement = useCallback(
+    () => {
+      if (engine.arranger.length() <= 0) {
+        toast('info', 'The arrangement is empty — drag dots from the TIMBRE MAP onto a track first.')
+        return
+      }
+      return runJob('ARRANGE', async (signal) => {
+        const blob = await renderOffline(engine, 0, {
+          arrangement: {
+            clips: engine.arranger.clips.map((c) => ({ ...c })),
+            tracks: engine.arranger.tracks.map((t) => ({ ...t })),
+          },
+          master: masterOpts(),
+          onProgress: progressTo(),
+          signal,
+          ...formatOpts(`Arrangement · seed ${engine.seed}`),
+        })
+        downloadBlob(blob, `exotica-arrangement-seed${engine.seed}-${Date.now()}.wav`)
+      })
+    },
+    [formatOpts, masterOpts, progressTo, runJob],
+  )
+
   const renderLoop = useCallback(
     (bars: number) =>
       runJob('LOOP', async (signal) => {
@@ -2453,6 +2481,27 @@ export function useAudioEngine() {
     [sync],
   )
 
+  /**
+   * No-drag route from the TIMBRE MAP / pin strip: lay these slices end to
+   * end after the last clip already on `track`.
+   */
+  const arrAppendSlices = useCallback((ids: number[], track = 0) => {
+    const arr = engine.arranger
+    let at = arr.clips.filter((c) => c.track === track).reduce((m, c) => Math.max(m, c.at + c.dur), 0)
+    let n = 0
+    for (const id of ids) {
+      const s = engine.slices[id]
+      if (!s) continue
+      if (arr.addClip(s.sourceIdx, s.start, s.duration, at, track)) {
+        at += s.duration
+        n++
+      }
+    }
+    if (n === 0) return
+    toast('info', `${n === 1 ? `Dot #${ids[0]}` : `${n} dots`} → ARRANGE T${track + 1}, ending at ${at.toFixed(1)}s.`)
+    sync()
+  }, [sync])
+
   const arrUpdateClip = useCallback((id: number, patch: Partial<ArrClip>) => {
     engine.arranger.updateClip(id, patch)
     sync()
@@ -2660,6 +2709,8 @@ export function useAudioEngine() {
     arrDuplicateClip,
     arrSetTrack,
     arrBounce,
+    arrAppendSlices,
+    renderArrangement,
     regionLoop,
     regionToSource,
     regionSplice,

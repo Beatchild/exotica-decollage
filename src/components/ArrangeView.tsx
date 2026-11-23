@@ -19,6 +19,7 @@ export function ArrangeView({ api }: { api: EngineApi }) {
   const {
     state, arrPlay, arrStop, arrSeek, arrToggleLoop, arrToggleSnap, arrAddClip,
     arrUpdateClip, arrRemoveClip, arrDuplicateClip, arrSetTrack, arrBounce, getArrPos,
+    renderArrangement,
   } = api
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const raf = useRef(0)
@@ -332,11 +333,20 @@ export function ArrangeView({ api }: { api: EngineApi }) {
           SNAP
         </button>
         <button
+          onClick={() => void renderArrangement()}
+          disabled={state.arrLen <= 0 || state.rendering || state.recording}
+          className="px-2 py-0.5 border text-[9px] tracking-widest disabled:opacity-35"
+          style={{ background: BURNT, color: CREAM, borderColor: BURNT }}
+          title="RENDER: the arrangement offline, faster than real time, through the master chain and loudness mastering (the RENDER settings: LUFS target, format) — saved as WAV"
+        >
+          ⤓ RENDER WAV
+        </button>
+        <button
           onClick={arrBounce}
-          disabled={state.arrLen <= 0 || state.recording}
+          disabled={state.arrLen <= 0 || state.recording || state.rendering}
           className="px-2 py-0.5 border border-charcoal text-[9px] tracking-widest disabled:opacity-35"
           style={{ background: CHARCOAL, color: CREAM }}
-          title="BOUNCE: one clean non-looped pass of the arrangement through the master chain, saved as WAV"
+          title="BOUNCE: records one live, real-time pass of the arrangement as you hear it (no mastering), saved as WAV"
         >
           ⤓ BOUNCE
         </button>

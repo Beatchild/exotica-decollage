@@ -215,7 +215,7 @@ export function ComposePanel({ api, minutes, setMinutes }: {
               </button>
             </span>
           ))}
-          {pinned.length > 1 && (
+          {pinned.length > 0 && (
             <span
               draggable
               onDragStart={(e) => {
@@ -223,9 +223,15 @@ export function ComposePanel({ api, minutes, setMinutes }: {
                 e.dataTransfer.effectAllowed = 'copy'
               }}
               className="ml-auto flex items-center gap-1 border border-charcoal/60 px-1.5 py-0.5 text-[9px] tracking-widest cursor-grab"
-              title="Drag every pinned dot onto an ARRANGE track — they land end to end"
+              title="Click a track: every pinned dot is appended end to end to that ARRANGE track — or drag this onto the timeline"
             >
-              <GripVertical size={10} /> DRAG ALL → ARRANGE
+              <GripVertical size={10} /> ALL → ARRANGE
+              {[0, 1, 2, 3].map((t) => (
+                <button key={t} onClick={() => api.arrAppendSlices(pinned.map((s) => s.id), t)}
+                  className="px-1 border border-charcoal/50 text-[8px] hover:bg-charcoal/10">
+                  T{t + 1}
+                </button>
+              ))}
             </span>
           )}
         </div>
