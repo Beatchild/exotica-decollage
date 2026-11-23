@@ -115,17 +115,14 @@ const SURFACE_LEVEL: Record<Era, number> = {
  */
 const surfaceCache = new Map<string, AudioBuffer>()
 
-export function eraSurface(sampleRate: number, era: Era): AudioBuffer | null {
-  if (era === 'none') return null
-  const key = `${sampleRate}:${era}`
-  const hit = surfaceCache.get(key)
-  if (hit) return hit
+/** The surface noise itself, as plain samples (runs in a worker or here). */
+export function eraSurfaceData(sampleRate: number, era: Era): [Float32Array, Float32Array] {
   const seed = 4049
   const len = Math.floor(sampleRate * 7)
-  const buf = new AudioBuffer({ numberOfChannels: 2, length: len, sampleRate })
+  const out = [new Float32Array(len), new Float32Array(len)]
   const rng = mulberry32(seed + era.length * 131)
   for (let ch = 0; ch < 2; ch++) {
-    const d = buf.getChannelData(ch)
+    const d = out[ch]
     let lp = 0
     let lp2 = 0
     for (let i = 0; i < len; i++) {
@@ -166,8 +163,64 @@ export function eraSurface(sampleRate: number, era: Era): AudioBuffer | null {
       d[i] = d[i] * k + d[len - x + i] * (1 - k)
     }
   }
+  return out as [Float32Array, Float32Array]
+}
+
+function toBuffer(sampleRate: number, d: [Float32Array, Float32Array]): AudioBuffer {
+  const buf = new AudioBuffer({ numberOfChannels: 2, length: d[0].length, sampleRate })
+  buf.copyToChannel(d[0] as Float32Array<ArrayBuffer>, 0)
+  buf.copyToChannel(d[1] as Float32Array<ArrayBuffer>, 1)
+  return buf
+}
+
+/** A cached surface, generated here if missing (blocks: prefer ensureEraSurfaces first). */
+export function eraSurface(sampleRate: number, era: Era): AudioBuffer | null {
+  if (era === 'none') return null
+  const key = `${sampleRate}:${era}`
+  const hit = surfaceCache.get(key)
+  if (hit) return hit
+  const buf = toBuffer(sampleRate, eraSurfaceData(sampleRate, era))
   surfaceCache.set(key, buf)
   return buf
+}
+
+export const eraSurfaceReady = (sampleRate: number, era: Era) => era === 'none' || surfaceCache.has(`${sampleRate}:${era}`)
+
+let surfWorker: Worker | null = null
+let surfBroken = false
+const surfPending = new Map<string, Promise<void>>()
+
+/** Generate the missing surfaces off the main thread (falls back to here, one per frame). */
+export function ensureEraSurfaces(sampleRate: number, eras: Era[]): Promise<void> {
+  const jobs = [...new Set(eras)].filter((e) => !eraSurfaceReady(sampleRate, e)).map((era) => {
+    const key = `${sampleRate}:${era}`
+    const run = surfPending.get(key)
+    if (run) return run
+    const job = new Promise<void>((resolve) => {
+      const local = () => setTimeout(() => { eraSurface(sampleRate, era); resolve() }, 0)
+      if (!surfBroken && !surfWorker) {
+        try {
+          surfWorker = new Worker(new URL('./eras.worker.ts', import.meta.url), { type: 'module' })
+          surfWorker.onerror = () => { surfBroken = true; surfWorker = null }
+        } catch {
+          surfBroken = true
+        }
+      }
+      const w = surfWorker
+      if (!w) { local(); return }
+      const onMsg = (ev: MessageEvent<{ key: string; L?: Float32Array; R?: Float32Array }>) => {
+        if (ev.data.key !== key) return
+        w.removeEventListener('message', onMsg)
+        if (ev.data.L && ev.data.R && !surfaceCache.has(key)) surfaceCache.set(key, toBuffer(sampleRate, [ev.data.L, ev.data.R]))
+        resolve()
+      }
+      w.addEventListener('message', onMsg)
+      w.postMessage({ key, sampleRate, era })
+    }).finally(() => surfPending.delete(key))
+    surfPending.set(key, job)
+    return job
+  })
+  return Promise.all(jobs).then(() => undefined)
 }
 
 /**
@@ -184,6 +237,8 @@ export function startEraSurfaces(
 ): AudioBufferSourceNode[] {
   const out: AudioBufferSourceNode[] = []
   for (const era of new Set(eras)) {
+    // only what is ready — generating here would stall the audio thread's feeder
+    if (!eraSurfaceReady(ctx.sampleRate, era)) continue
     const buf = eraSurface(ctx.sampleRate, era)
     if (!buf) continue
     const src = ctx.createBufferSource()

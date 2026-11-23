@@ -3,7 +3,7 @@ import type { HarmCtx } from './generate'
 import { chordAt, chordCorrection, makeProgression } from './Harmony'
 import type { Motif } from './Harmony'
 import { mulberry32 } from './rng'
-import { eraChain, startEraSurfaces } from './eras'
+import { eraChain, ensureEraSurfaces, startEraSurfaces } from './eras'
 import { LAYERS_OFF, layersActive, memoryLanes, prepareStretches, sectionIndexAt, sectionSpanAt } from './memoryLayers'
 import type { MemoryLayerParams } from './memoryLayers'
 import type { MixBus } from './AudioEngine'
@@ -170,6 +170,7 @@ export async function renderRaw(
   const ml = soloBus ? soloLayers(engine.memLayers, soloBus) : engine.memLayers
   const layersOn = !loopSec && (opts.soloVoice ?? null) === null && layersActive(ml)
   if (layersOn && ml.stretch > 0.02) await prepareStretches(engine.slices, engine.sources)
+  await ensureEraSurfaces(sampleRate, engine.sources.filter((x) => !x.bed).map((x) => x.era ?? 'none'))
   throwIfAborted(opts.signal)
   const ctx = new OfflineAudioContext(2, Math.ceil(seconds * sampleRate), sampleRate)
   const { voices, telephony, crush } = engine

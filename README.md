@@ -286,6 +286,15 @@ explicit gesture per browser autoplay policy), then **▶**.
 - Loudness, limiting, WAV encoding and the zip CRC run in
   `master.worker.ts`.
 - Presets only re-slice the pool when the fragment regime actually changes.
+- **Smooth live playback** — every live voice keeps a cursor on the audio
+  clock and is scheduled 1.2 s ahead (`drive()` in `AudioEngine.ts`); timers
+  only refill, so the rhythm is sample-exact and a busy main thread (React, GC,
+  a weave) or a throttled background window has ~0.8 s of slack. Measured:
+  0 late events with the main thread blocked 500 ms every 2 s. Fired-event UI
+  highlights are delayed to when they actually sound. The AudioContext uses
+  `latencyHint: 'playback'` (a larger output buffer: no crackle under load).
+- Era surface noise (crackle, hiss, hum) is generated in `eras.worker.ts` and
+  fades in when ready; offline renders wait for it.
 
 ## Desktop app (Tauri)
 

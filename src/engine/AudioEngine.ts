@@ -18,7 +18,7 @@ import { buildInterleave, buildMixtape, extractHighlights, trackCharacter } from
 import { encodeWav } from './WavRecorder'
 import { ytFetchAudio } from './ytBridge'
 import { mulberry32, randomSeed } from './rng'
-import { eraChain, startEraSurfaces } from './eras'
+import { eraChain, ensureEraSurfaces, eraSurfaceReady, startEraSurfaces } from './eras'
 import type { Era } from './eras'
 import { LAYERS_OFF, layersActive, memoryLanes, prepareStretches, sectionIndexAt, sectionSpanAt } from './memoryLayers'
 import type { MemoryLayerParams } from './memoryLayers'
@@ -58,6 +58,15 @@ import type {
 } from './types'
 
 const LOOKAHEAD = 0.12 // seconds of scheduling headroom
+/**
+ * Look-ahead scheduling: each voice keeps a cursor on the audio clock and is
+ * filled AHEAD seconds in advance; its timer wakes WAKE seconds before the
+ * cursor runs out. Rhythm is sample-exact (cursors chain, timers only refill),
+ * and a busy main thread (React, GC, a weave) or a throttled background window
+ * (timers at 1 s) has ~0.8 s of slack before anything is late.
+ */
+const AHEAD = 1.2
+const WAKE = 0.8
 const MAX_SOURCES = 6
 
 export interface SourceRec {
@@ -251,6 +260,8 @@ export class AudioEngine {
   private sendGains: GainNode[] = []
   private duckGain: GainNode | null = null
   private timers: number[] = Array.from({ length: NUM_VOICES }, () => 0)
+  /** per voice: audio-clock time its next event / cycle starts */
+  private nextAt: number[] = Array.from({ length: NUM_VOICES }, () => 0)
   private driftTimer = 0
   private driftTargets: MacroParams | null = null
   private morphTimer = 0
@@ -294,7 +305,8 @@ export class AudioEngine {
   /** Must be called from a user gesture (browser autoplay policy). */
   async init() {
     if (this.ctx) return
-    const ctx = new AudioContext()
+    // 'playback': a larger output buffer — no crackle when the audio thread is busy (ambient needs no 10 ms response)
+    const ctx = new AudioContext({ latencyHint: 'playback' })
     await ctx.resume()
     Tone.setContext(ctx)
     this.ctx = ctx
@@ -701,6 +713,7 @@ export class AudioEngine {
   play() {
     if (!this.ctx || this.slices.length === 0 || this.playing) return
     this.playing = true
+    this.nextAt.fill(0)
     this.scheduleVoice1()
     this.scheduleVoice2()
     this.scheduleVoice3()
@@ -2122,10 +2135,13 @@ export class AudioEngine {
   }
 
   private memSourceNodes = new Set<AudioBufferSourceNode>()
+  /** bumps on every (re)start: late async work for an older start is dropped */
+  private memGenId = 0
 
   /** (Re)start the layer lanes and era surfaces on the live clock. */
   private startMemLayers() {
     window.clearInterval(this.memTimer)
+    this.memGenId++
     for (const n of this.memSourceNodes) {
       try { n.stop() } catch { /* done */ }
     }
@@ -2141,6 +2157,15 @@ export class AudioEngine {
     }
     const eras = this.sources.filter((x) => !x.bed).map((x) => x.era ?? 'none')
     for (const n of startEraSurfaces(ctx, buses.surface.dry, eras, start, this.seed)) track(n)
+    // media heard for the first time: their noise is made in a worker, and fades in when ready
+    const missing = eras.filter((x) => !eraSurfaceReady(ctx.sampleRate, x))
+    if (missing.length) {
+      const gen = ++this.memGenId
+      void ensureEraSurfaces(ctx.sampleRate, missing).then(() => {
+        if (gen !== this.memGenId || !this.playing || !this.ctx) return
+        for (const n of startEraSurfaces(this.ctx, buses.surface.dry, missing, this.ctx.currentTime + 0.05, this.seed)) track(n)
+      })
+    }
     this.memGens = memoryLanes({
       ctx,
       buses,
@@ -2238,7 +2263,36 @@ export class AudioEngine {
   }
 
   private emit(e: FiredEvent) {
+    // scheduled ahead: light the UI when it sounds, not when it was queued
+    const ahead = this.ctx ? e.time - this.ctx.currentTime : 0
+    if (ahead > 0.04) {
+      window.setTimeout(() => { if (this.playing) for (const fn of this.listeners) fn(e) }, ahead * 1000)
+      return
+    }
     for (const fn of this.listeners) fn(e)
+  }
+
+  /**
+   * Fill one voice's schedule up to AHEAD seconds from now. `step(t0)` lays
+   * out what starts at t0 and returns how long until the next start (null =
+   * nothing possible now, retry in a second).
+   */
+  private drive(v: number, again: () => void, step: (t0: number) => number | null) {
+    const ctx = this.ctx
+    if (!ctx || !this.playing) return
+    const now = ctx.currentTime
+    // fell behind (first start, or the thread was frozen): restart from now
+    if (this.nextAt[v] < now + LOOKAHEAD) this.nextAt[v] = now + LOOKAHEAD
+    let guard = 0
+    while (this.nextAt[v] < now + AHEAD && guard++ < 64) {
+      const d = step(this.nextAt[v])
+      if (d == null) {
+        this.timers[v] = window.setTimeout(again, 1000)
+        return
+      }
+      this.nextAt[v] += Math.max(0.03, d)
+    }
+    this.timers[v] = window.setTimeout(again, Math.max(15, (this.nextAt[v] - ctx.currentTime - WAKE) * 1000))
   }
 
   private emitChange() {
@@ -2706,9 +2760,8 @@ export class AudioEngine {
   }
 
   /** Replay a voice's cell verbatim; every 8th repeat may mutate one event. */
-  private runLooped(voice: number): number {
+  private runLooped(voice: number, t0 = this.ctx!.currentTime + LOOKAHEAD): number {
     const cell = this.loopCells[voice] ?? (this.loopCells[voice] = this.captureCell(voice))
-    const t0 = this.ctx!.currentTime + LOOKAHEAD
     for (const ev of cell.events) this.realizeEvent(ev, t0 + ev.t)
     cell.reps++
     if (cell.reps % 8 === 0 && cell.events.length > 0 && this.voiceRng[voice]() < 0.6) {
@@ -2754,56 +2807,41 @@ export class AudioEngine {
   }
 
   private scheduleVoice1() {
-    if (!this.playing || !this.ctx) return
-    if (this.phraseMode) {
-      // PHRASE: one onset-aligned region looping verbatim with a crossfade
-      const region = this.phraseRegion ?? this.pickPhraseRegion(this.voiceRng[0])
-      if (region) {
-        const ev = this.phraseEventFor(region)
-        if (ev) this.realizeEvent(ev, this.ctx.currentTime + LOOKAHEAD)
-        this.phraseCycle = { start: this.ctx.currentTime + LOOKAHEAD, region }
-        this.timers[0] = window.setTimeout(
-          () => this.scheduleVoice1(),
-          Math.max(300, (region.dur - 0.08) * 1000),
-        )
-        return
+    this.drive(0, () => this.scheduleVoice1(), (t0) => {
+      if (this.phraseMode) {
+        // PHRASE: one onset-aligned region looping verbatim with a crossfade
+        const region = this.phraseRegion ?? this.pickPhraseRegion(this.voiceRng[0])
+        if (region) {
+          const ev = this.phraseEventFor(region)
+          if (ev) this.realizeEvent(ev, t0)
+          this.phraseCycle = { start: t0, region }
+          return Math.max(0.3, region.dur - 0.08)
+        }
       }
-    }
-    if (this.looped) {
-      const dur = this.runLooped(0)
-      this.timers[0] = window.setTimeout(() => this.scheduleVoice1(), dur * 1000)
-      return
-    }
-    const { events, cycleDur, sliceChroma, padSemis } = genV1Cycle(
-      this.poolFor(0, 'harmonic'),
-      this.voices[0],
-      this.macros,
-      this.scale,
-      this.voiceRng[0],
-      this.tape,
-      this.harmCtxAt(this.ctx.currentTime + LOOKAHEAD),
-      this.fragK,
-      this.reverseProb,
-    )
-    this.lastV1Chroma = sliceChroma
-    if (padSemis) this.lastPadSemis = padSemis
-    const t0 = this.ctx.currentTime + LOOKAHEAD
-    for (const ev of events) this.realizeEvent(ev, t0 + ev.t)
-    // overlap the next cycle slightly so slice changes crossfade
-    this.timers[0] = window.setTimeout(
-      () => this.scheduleVoice1(),
-      Math.max(1, cycleDur - 0.6) * 1000,
-    )
+      if (this.looped) return this.runLooped(0, t0)
+      const { events, cycleDur, sliceChroma, padSemis } = genV1Cycle(
+        this.poolFor(0, 'harmonic'),
+        this.voices[0],
+        this.macros,
+        this.scale,
+        this.voiceRng[0],
+        this.tape,
+        this.harmCtxAt(t0),
+        this.fragK,
+        this.reverseProb,
+      )
+      this.lastV1Chroma = sliceChroma
+      if (padSemis) this.lastPadSemis = padSemis
+      for (const ev of events) this.realizeEvent(ev, t0 + ev.t)
+      // overlap the next cycle slightly so slice changes crossfade
+      return Math.max(1, cycleDur - 0.6)
+    })
   }
 
   private scheduleVoice2() {
     if (!this.playing || !this.ctx) return
-    if (this.looped) {
-      const dur = this.runLooped(1)
-      this.timers[1] = window.setTimeout(() => this.scheduleVoice2(), dur * 1000)
-      return
-    }
-    if (this.groove) {
+    if (this.groove && !this.looped) {
+      this.nextAt[1] = 0 // leaving the groove later starts fresh
       // batch-schedule a lookahead window of grid onsets so background-tab
       // timer throttling (≥1s) can't starve the groove
       const horizon = this.ctx.currentTime + 2.4
@@ -2828,33 +2866,31 @@ export class AudioEngine {
       this.timers[1] = window.setTimeout(() => this.scheduleVoice2(), 1200)
       return
     }
-    const { event, dt, idx } = genV2Step(
-      this.poolFor(1, 'transient'),
-      this.voices[1],
-      this.macros,
-      this.bpm,
-      this.markovIdx,
-      this.voiceRng[1],
-    )
-    this.markovIdx = idx
-    this.realizeEvent(event, this.ctx.currentTime + LOOKAHEAD)
-    this.timers[1] = window.setTimeout(() => this.scheduleVoice2(), dt * 1000)
+    this.drive(1, () => this.scheduleVoice2(), (t0) => {
+      if (this.looped) return this.runLooped(1, t0)
+      if (this.groove) return null // switched on meanwhile: the groove branch takes over
+      const { event, dt, idx } = genV2Step(
+        this.poolFor(1, 'transient'),
+        this.voices[1],
+        this.macros,
+        this.bpm,
+        this.markovIdx,
+        this.voiceRng[1],
+      )
+      this.markovIdx = idx
+      this.realizeEvent(event, t0)
+      return dt
+    })
   }
 
   private scheduleVoice3() {
-    if (!this.playing || !this.ctx) return
-    if (this.looped) {
-      const dur = this.runLooped(2)
-      this.timers[2] = window.setTimeout(() => this.scheduleVoice3(), dur * 1000)
-      return
-    }
-    const pool = [...this.poolFor(2, 'texture'), ...this.poolFor(2, 'harmonic')]
-    const { event, dt } = genV3Step(
-      pool, this.voices[2], this.voiceRng[2], this.tape,
-      this.harmCtxAt(this.ctx.currentTime + LOOKAHEAD),
-    )
-    this.realizeEvent(event, this.ctx.currentTime + LOOKAHEAD)
-    this.timers[2] = window.setTimeout(() => this.scheduleVoice3(), dt * 1000)
+    this.drive(2, () => this.scheduleVoice3(), (t0) => {
+      if (this.looped) return this.runLooped(2, t0)
+      const pool = [...this.poolFor(2, 'texture'), ...this.poolFor(2, 'harmonic')]
+      const { event, dt } = genV3Step(pool, this.voices[2], this.voiceRng[2], this.tape, this.harmCtxAt(t0))
+      this.realizeEvent(event, t0)
+      return dt
+    })
   }
 
   private startVoice4() {
@@ -2875,43 +2911,30 @@ export class AudioEngine {
   }
 
   private scheduleVoice5() {
-    if (!this.playing || !this.ctx) return
-    if (this.looped) {
-      const dur = this.runLooped(4)
-      this.timers[4] = window.setTimeout(() => this.scheduleVoice5(), dur * 1000)
-      return
-    }
-    const pool = [...this.poolFor(4, 'transient'), ...this.poolFor(4, 'harmonic')]
-    const { events, dt } = genV5Cell(
-      pool, this.voices[4], this.macros, this.scale, this.voiceRng[4],
-      this.harmCtxAt(this.ctx.currentTime + LOOKAHEAD), this.fragK,
-    )
-    const t0 = this.ctx.currentTime + LOOKAHEAD
-    for (const ev of events) this.realizeEvent(ev, t0 + ev.t)
-    this.timers[4] = window.setTimeout(() => this.scheduleVoice5(), dt * 1000)
+    this.drive(4, () => this.scheduleVoice5(), (t0) => {
+      if (this.looped) return this.runLooped(4, t0)
+      const pool = [...this.poolFor(4, 'transient'), ...this.poolFor(4, 'harmonic')]
+      const { events, dt } = genV5Cell(
+        pool, this.voices[4], this.macros, this.scale, this.voiceRng[4], this.harmCtxAt(t0), this.fragK,
+      )
+      for (const ev of events) this.realizeEvent(ev, t0 + ev.t)
+      return dt
+    })
   }
 
   /** Voice 7 — melody: motif phrases (needs CHORDLOCK for a harmonic frame). */
   private scheduleVoice7() {
-    if (!this.playing || !this.ctx) return
-    if (this.looped) {
-      const dur = this.runLooped(6)
-      this.timers[6] = window.setTimeout(() => this.scheduleVoice7(), dur * 1000)
-      return
-    }
-    const harm = this.harmCtxAt(this.ctx.currentTime + LOOKAHEAD)
-    if (!harm) {
-      this.timers[6] = window.setTimeout(() => this.scheduleVoice7(), 2000)
-      return
-    }
-    const { events, dur, motif } = genV7Phrase(
-      this.poolFor(6, 'harmonic'), this.voices[6], harm, this.bpm, this.voiceRng[6],
-      this.melodyMotif,
-    )
-    this.melodyMotif = motif
-    const t0 = this.ctx.currentTime + LOOKAHEAD
-    for (const ev of events) this.realizeEvent(ev, t0 + ev.t)
-    this.timers[6] = window.setTimeout(() => this.scheduleVoice7(), dur * 1000)
+    this.drive(6, () => this.scheduleVoice7(), (t0) => {
+      if (this.looped) return this.runLooped(6, t0)
+      const harm = this.harmCtxAt(t0)
+      if (!harm) return null
+      const { events, dur, motif } = genV7Phrase(
+        this.poolFor(6, 'harmonic'), this.voices[6], harm, this.bpm, this.voiceRng[6], this.melodyMotif,
+      )
+      this.melodyMotif = motif
+      for (const ev of events) this.realizeEvent(ev, t0 + ev.t)
+      return dur
+    })
   }
 
   /**
