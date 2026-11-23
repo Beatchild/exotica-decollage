@@ -577,7 +577,7 @@ function weaveInto(minutes: number, knobs: MoodKnobs, opts: WeaveOpts) {
   }
   const prev = engine.memLayers
   engine.memLayers = {
-    ...(prev.stretch || prev.motif || prev.ghosts ? { ...prev, loop: prev.loop ?? LAYERS_WEAVE.loop } : { ...prev, ...LAYERS_WEAVE }),
+    ...(prev.stretch || prev.motif || prev.ghosts ? { ...prev, loop: prev.loop ?? LAYERS_WEAVE.loop, lines: prev.lines ?? LAYERS_WEAVE.lines } : { ...prev, ...LAYERS_WEAVE }),
     motifSeed: opts.motifSeed ?? (prev.motifSeed > 1 ? prev.motifSeed : randomSeed()),
     kin: undefined, // a plain weave: no texture-kin lead
   }
@@ -608,7 +608,7 @@ let kinFams: KinFamily[] = []
 let kinRoles: number[] = []
 const KIN_SEED = 1
 /** what the memory layers do under a KIN weave: the kin lead, the rest as atmosphere */
-const LAYERS_KIN = { stretch: 0.4, motif: 0.2, ghosts: 0.15, loop: 0.55 }
+const LAYERS_KIN = { stretch: 0.4, motif: 0.2, ghosts: 0.15, loop: 0.55, lines: 0.4 }
 
 function kinInto(minutes: number, knobs: MoodKnobs, o: KinOpts): boolean {
   applyMoodTo(engine, 'memory', knobs) // re-slices long first: families and pins after

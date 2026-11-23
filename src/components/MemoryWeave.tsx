@@ -8,6 +8,7 @@ import type { Era } from '../engine/eras'
 import type { MoodKnobs } from '../engine/moods'
 import { randomSeed } from '../engine/rng'
 import { midi } from '../ui/midi'
+import { modeOf } from '../engine/lines'
 
 type Api = ReturnType<typeof useAudioEngine>
 
@@ -262,13 +263,15 @@ export function MemoryWeave({ api, minutes, setMinutes, knobs, onWeave }: {
               hint="fragments slowed into breathing clouds — strongest in DUST and DISSOLVING" />
             <Slider label="RETURNING MELODY" value={L.motif} onChange={(v) => api.setMemoryLayers({ motif: v })}
               hint="one melody: far off, then whole, then back slower and broken" />
+            <Slider label="MELODIC LINES" value={L.lines ?? 0} onChange={(v) => api.setMemoryLayers({ lines: v })}
+              hint={`lead · ostinato (vibes, tremolo) · counter-line from 45 · bell echoes from 70 — in ${modeOf(L.motifSeed).toUpperCase()}, quoting the melody`} />
             <Slider label="GHOST VOICES" value={L.ghosts} onChange={(v) => api.setMemoryLayers({ ghosts: v })}
               hint="the most voice-like fragments, through a wall or an old phone" />
             <Slider label="DISINTEGRATING TAPE" value={L.loop ?? 0} onChange={(v) => api.setMemoryLayers({ loop: v })}
               hint="DISSOLVING: one phrase loops and falls apart a little more every pass, until only fragments remain" />
             <button onClick={() => api.setMemoryLayers({ motifSeed: randomSeed() })}
               className="flex items-center gap-1 border border-charcoal/60 px-2 py-1 text-[9px] tracking-widest hover:bg-charcoal/10"
-              title="Another melody for the returning motif">
+              title="Another melody: the returning motif and the melodic lines (and their mode)">
               <Music size={11} /> ANOTHER MELODY
             </button>
           </div>

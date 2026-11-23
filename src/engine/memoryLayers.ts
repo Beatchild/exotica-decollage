@@ -7,6 +7,7 @@ import type { Slice, SongSection } from './types'
 import { cachedStretch, stretchRegion } from './stretch'
 import type { FormPos, KinPlan } from './kin'
 import { kinLane } from './kin'
+import { linesLane } from './lines'
 
 /**
  * MEMORY LAYERS — three things that make a woven track feel *remembered*:
@@ -31,16 +32,18 @@ export interface MemoryLayerParams {
   loop: number
   /** the motif's own seed — kept apart from the take seed so an album can quote it */
   motifSeed: number
+  /** MELODIC LINES: lead · counter · ostinato · bell, made of the material */
+  lines?: number
   /** TEXTURE KIN: the same texture from many sources, staged as drama */
   kin?: KinPlan
 }
 
-export const LAYERS_OFF: MemoryLayerParams = { stretch: 0, motif: 0, ghosts: 0, loop: 0, motifSeed: 1 }
-export const LAYERS_WEAVE = { stretch: 0.65, motif: 0.7, ghosts: 0.45, loop: 0.7 }
+export const LAYERS_OFF: MemoryLayerParams = { stretch: 0, motif: 0, ghosts: 0, loop: 0, lines: 0, motifSeed: 1 }
+export const LAYERS_WEAVE = { stretch: 0.6, motif: 0.6, ghosts: 0.4, loop: 0.7, lines: 0.65 }
 
 /** any layer switched on? */
 export const layersActive = (p: MemoryLayerParams) =>
-  p.stretch > 0.02 || p.motif > 0.02 || p.ghosts > 0.02 || (p.loop ?? 0) > 0.02 || (p.kin?.amt ?? 0) > 0.02
+  p.stretch > 0.02 || p.motif > 0.02 || p.ghosts > 0.02 || (p.loop ?? 0) > 0.02 || (p.kin?.amt ?? 0) > 0.02 || (p.lines ?? 0) > 0.02
 
 /** per form section (DUST · SURFACING · THE MEMORY · DISSOLVING), and with no form */
 const STRETCH_W = [0.8, 0.5, 0.35, 0.9]
@@ -249,6 +252,7 @@ export function memoryLanes(env: LayerEnv): Array<Generator<number, void, void>>
   if (params.ghosts > 0.02) lanes.push(ghostLane(env))
   if ((params.loop ?? 0) > 0.02) lanes.push(loopLane(env))
   if ((params.kin?.amt ?? 0) > 0.02) lanes.push(kinLane(env))
+  if ((params.lines ?? 0) > 0.02) lanes.push(linesLane(env))
   return lanes
 }
 

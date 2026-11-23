@@ -1057,7 +1057,7 @@ export function stemBuses(engine: AudioEngine): MixBus[] {
   const ml = engine.memLayers
   const out: MixBus[] = []
   if (ml.stretch > 0.02) out.push('clouds')
-  if (ml.motif > 0.02) out.push('melody')
+  if (ml.motif > 0.02 || (ml.lines ?? 0) > 0.02) out.push('melody')
   if (ml.ghosts > 0.02) out.push('ghosts')
   if ((ml.loop ?? 0) > 0.02) out.push('loop')
   if ((ml.kin?.amt ?? 0) > 0.02) out.push('kin')
@@ -1068,7 +1068,7 @@ export function stemBuses(engine: AudioEngine): MixBus[] {
 /** Only the layer behind one bus (surface: none — it is the eras' noise). */
 function soloLayers(ml: MemoryLayerParams, bus: MixBus): MemoryLayerParams {
   const only: Partial<MemoryLayerParams> =
-    bus === 'clouds' ? { stretch: ml.stretch } : bus === 'melody' ? { motif: ml.motif }
+    bus === 'clouds' ? { stretch: ml.stretch } : bus === 'melody' ? { motif: ml.motif, lines: ml.lines }
       : bus === 'ghosts' ? { ghosts: ml.ghosts } : bus === 'loop' ? { loop: ml.loop } : bus === 'kin' ? { kin: ml.kin } : {}
   return { ...LAYERS_OFF, motifSeed: ml.motifSeed, ...only }
 }

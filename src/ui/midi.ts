@@ -8,7 +8,7 @@
 export type MidiTarget =
   | 'darkness' | 'space' | 'motion'
   | 'mix.voices' | 'mix.clouds' | 'mix.melody' | 'mix.ghosts' | 'mix.loop' | 'mix.kin' | 'mix.surface'
-  | 'layer.stretch' | 'layer.motif' | 'layer.ghosts' | 'layer.loop' | 'layer.kin'
+  | 'layer.stretch' | 'layer.motif' | 'layer.ghosts' | 'layer.loop' | 'layer.lines' | 'layer.kin'
   | 'master.toggle' | 'transport.toggle' | 'weave'
 
 export const MIDI_TARGETS: Array<{ key: MidiTarget; label: string; kind: 'knob' | 'button' }> = [
@@ -26,6 +26,7 @@ export const MIDI_TARGETS: Array<{ key: MidiTarget; label: string; kind: 'knob' 
   { key: 'layer.motif', label: 'RETURNING MELODY', kind: 'knob' },
   { key: 'layer.ghosts', label: 'GHOST VOICES', kind: 'knob' },
   { key: 'layer.loop', label: 'DISINTEGRATING TAPE', kind: 'knob' },
+  { key: 'layer.lines', label: 'MELODIC LINES', kind: 'knob' },
   { key: 'layer.kin', label: 'TEXTURE KIN', kind: 'knob' },
   { key: 'master.toggle', label: 'MASTER ON / OFF', kind: 'button' },
   { key: 'transport.toggle', label: 'PLAY / PAUSE', kind: 'button' },

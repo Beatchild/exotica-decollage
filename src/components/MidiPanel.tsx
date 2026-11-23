@@ -27,6 +27,7 @@ export function MidiPanel({ api }: { api: Api }) {
     else if (t === 'layer.motif') api.setMemoryLayers({ motif: v })
     else if (t === 'layer.ghosts') api.setMemoryLayers({ ghosts: v })
     else if (t === 'layer.loop') api.setMemoryLayers({ loop: v })
+    else if (t === 'layer.lines') api.setMemoryLayers({ lines: v })
     else if (t === 'layer.kin') api.setKin({ amt: v })
     else if (t === 'master.toggle') api.setMasterBypass(!api.state.masterBypass)
     else if (t === 'transport.toggle') {

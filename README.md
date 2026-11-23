@@ -129,7 +129,17 @@ explicit gesture per browser autoplay policy), then **▶**.
     DISSOLVING; RETURNING MELODY — one pentatonic motif played on the clearest
     pitched fragment: far and partial in SURFACING, whole in THE MEMORY, back
     slower, sinking and partly backwards in DISSOLVING (ANOTHER MELODY = new
-    motif seed); GHOST VOICES — the most voice-like fragments, behind a wall or
+    motif seed); MELODIC LINES (`lines.ts`) — several melodies at once, in
+    the exotica / hauntology manner, each on its own pitched fragment of the
+    material: a LEAD in periods (A asks · A′ answers · B quotes the returning
+    motif · A″ comes home; chord tones on strong beats, occasional glides), an
+    OSTINATO (the chord broken in eighths with vibraphone-motor tremolo), a
+    COUNTER-line below moving against the lead (amount ≥ 45) and BELL echoes of
+    the lead's last notes an octave up (≥ 70); the mode (lydian, dorian,
+    mixolydian, pentatonic, harmonic minor, major) follows the melody seed.
+    DUST: only the ostinato, far · SURFACING: the lead half-heard · THE MEMORY:
+    all of it · DISSOLVING: slower, with gaps, some backwards. MELODY bus and
+    stem; GHOST VOICES — the most voice-like fragments, behind a wall or
     down a phone line, sometimes reversed, with an echo.
   - **Live form** — a playhead on the section bar; click a section to play from
     it; drag a seam to re-proportion (kept when the length or knobs change).
