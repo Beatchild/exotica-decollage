@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Dices, Disc3, Download, GripVertical, ListMusic, Play, Pin, PinOff, X } from 'lucide-react'
 import type { useAudioEngine } from '../hooks/useAudioEngine'
 import { MemoryWeave } from './MemoryWeave'
+import { KinWeave } from './KinWeave'
 import { midi } from '../ui/midi'
 import { MOODS } from '../engine/moods'
 import type { MoodKnobs } from '../engine/moods'
@@ -141,6 +142,8 @@ export function ComposePanel({ api, minutes, setMinutes }: {
         </span>
       </div>
       <MemoryWeave api={api} minutes={minutes} setMinutes={setMinutes} knobs={memKnobs}
+        onWeave={() => { setMood('memory'); setKnobs(memKnobs) }} />
+      <KinWeave api={api} minutes={minutes} knobs={memKnobs}
         onWeave={() => { setMood('memory'); setKnobs(memKnobs) }} />
 
       {/* 1 · material */}

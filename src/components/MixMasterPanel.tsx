@@ -24,6 +24,7 @@ const BUSES: Array<{ key: keyof MixLevels; label: string; hint: string }> = [
   { key: 'melody', label: 'MELODY', hint: 'the returning melody' },
   { key: 'ghosts', label: 'GHOSTS', hint: 'ghost voices' },
   { key: 'loop', label: 'LOOP', hint: 'the disintegrating tape loop' },
+  { key: 'kin', label: 'KIN', hint: 'TEXTURE KIN: the same texture from many sources' },
   { key: 'surface', label: 'SURFACE', hint: 'the eras’ crackle, hiss, hum and static' },
 ]
 

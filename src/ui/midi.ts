@@ -7,8 +7,8 @@
 
 export type MidiTarget =
   | 'darkness' | 'space' | 'motion'
-  | 'mix.voices' | 'mix.clouds' | 'mix.melody' | 'mix.ghosts' | 'mix.loop' | 'mix.surface'
-  | 'layer.stretch' | 'layer.motif' | 'layer.ghosts' | 'layer.loop'
+  | 'mix.voices' | 'mix.clouds' | 'mix.melody' | 'mix.ghosts' | 'mix.loop' | 'mix.kin' | 'mix.surface'
+  | 'layer.stretch' | 'layer.motif' | 'layer.ghosts' | 'layer.loop' | 'layer.kin'
   | 'master.toggle' | 'transport.toggle' | 'weave'
 
 export const MIDI_TARGETS: Array<{ key: MidiTarget; label: string; kind: 'knob' | 'button' }> = [
@@ -20,11 +20,13 @@ export const MIDI_TARGETS: Array<{ key: MidiTarget; label: string; kind: 'knob' 
   { key: 'mix.melody', label: 'MIX · MELODY', kind: 'knob' },
   { key: 'mix.ghosts', label: 'MIX · GHOSTS', kind: 'knob' },
   { key: 'mix.loop', label: 'MIX · LOOP', kind: 'knob' },
+  { key: 'mix.kin', label: 'MIX · KIN', kind: 'knob' },
   { key: 'mix.surface', label: 'MIX · SURFACE', kind: 'knob' },
   { key: 'layer.stretch', label: 'STRETCH', kind: 'knob' },
   { key: 'layer.motif', label: 'RETURNING MELODY', kind: 'knob' },
   { key: 'layer.ghosts', label: 'GHOST VOICES', kind: 'knob' },
   { key: 'layer.loop', label: 'DISINTEGRATING TAPE', kind: 'knob' },
+  { key: 'layer.kin', label: 'TEXTURE KIN', kind: 'knob' },
   { key: 'master.toggle', label: 'MASTER ON / OFF', kind: 'button' },
   { key: 'transport.toggle', label: 'PLAY / PAUSE', kind: 'button' },
   { key: 'weave', label: 'WEAVE A MEMORY', kind: 'button' },

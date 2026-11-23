@@ -33,10 +33,11 @@ export interface MixLevels {
   melody: number
   ghosts: number
   loop: number
+  kin: number
   surface: number
 }
-export const MIX_DEFAULT: MixLevels = { voices: 1, clouds: 1, melody: 1, ghosts: 1, loop: 1, surface: 1 }
-export const MIX_BUSES = ['clouds', 'melody', 'ghosts', 'loop', 'surface'] as const
+export const MIX_DEFAULT: MixLevels = { voices: 1, clouds: 1, melody: 1, ghosts: 1, loop: 1, kin: 1, surface: 1 }
+export const MIX_BUSES = ['clouds', 'melody', 'ghosts', 'loop', 'kin', 'surface'] as const
 export type MixBus = (typeof MIX_BUSES)[number]
 import type { Rng } from './rng'
 import {
@@ -344,7 +345,7 @@ export class AudioEngine {
       Tone.connect(send, this.dsp!.reverbSend)
       return { dry, send }
     }
-    this.mixBuses = { clouds: bus('clouds'), melody: bus('melody'), ghosts: bus('ghosts'), loop: bus('loop'), surface: bus('surface') }
+    this.mixBuses = { clouds: bus('clouds'), melody: bus('melody'), ghosts: bus('ghosts'), loop: bus('loop'), kin: bus('kin'), surface: bus('surface') }
 
     // analysis + recording taps off the processed master
     // MASTER preview: studio output → release chain → speakers (and the meters)
@@ -2156,6 +2157,11 @@ export class AudioEngine {
         if (!this.songActive || !isMemoryForm(this)) return null
         const sp = sectionSpanAt(this.songSections, w - this.songT0)
         return sp && { index: sp.index, start: sp.start + this.songT0, end: sp.end + this.songT0 }
+      },
+      formPos: (w) => {
+        if (!this.songActive || !isMemoryForm(this)) return null
+        const total = this.songSections.reduce((n, x) => n + x.sec, 0)
+        return { t: Math.max(0, w - this.songT0), total }
       },
       track,
     })

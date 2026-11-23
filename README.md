@@ -141,6 +141,31 @@ explicit gesture per browser autoplay policy), then **▶**.
     a light → dark → light arc; titles are suggested. Replaces the album plan
     (previous plan kept under `exotica.album.v1.backup`). Patches carry the
     layers (`ml`) and eras (`era`).
+- **TEXTURE KIN** (`engine/kin.ts`, `KinWeave.tsx`, COMPOSE → ADVANCED) — the
+  same texture found in many recordings, staged as drama:
+  - **Families** — every usable fragment of every source is fingerprinted
+    (brightness, noise, attack, length, pitch clarity) and clustered (seeded
+    k-means) into named families of kin (WARM BREATH, GLASS HISS, DARK
+    KNOCKS…), whatever source they came from. Each family takes the few most
+    typical fragments *per source* (× the WEAVE source weights), so ten sources
+    really mix; fragments are evened to the family's median loudness and keep
+    their source's medium (era).
+  - **Roles** — a LEAD family, an ANSWER (the most contrasting one) and a third
+    for the peak; any family can be made LEAD or ANSWER from its card.
+  - **Arcs** — CLASSIC (exposition → rising → climax → falling → coda), TWO
+    WAVES, SLOW BURN, FADING CHOIR. Each act has a mode: *speak* (one source at
+    a time, the same gesture handed on — one voice, many mouths), *dialog*
+    (two families answer each other), *chorus* (every source at once, a breath
+    apart, each in its own fixed place in the stereo field), *lone* (one source
+    alone). A drawable **tension curve** drives density, brightness, register,
+    how many sources sound at once and how far the intervals stray. RELAY and
+    CHORUS sliders; its own MIX bus (KIN), stem and MIDI targets.
+  - **KIN ALBUM** — every track led by a different family (the last returns to
+    the first one's), each on an arc chosen for its place (slow burn first, the
+    biggest wave at ~60 %, a fading choir last, no two neighbours alike),
+    related keys, the album's intensity rising and falling. Replaces the album
+    plan (previous plan kept as backup). The plan lives in `ml.kin`, so it
+    renders, stems and saves in patches like the other layers.
 - **MIX & MASTER** (`MixMasterPanel.tsx`, `mastering.ts`, Alt+6) — the
   finishing stage:
   - **MIX** — five bus faders (−∞ … +6 dB, double-click = 0 dB): VOICES (the

@@ -5,6 +5,8 @@ import { mulberry32 } from './rng'
 import type { Rng } from './rng'
 import type { Slice, SongSection } from './types'
 import { cachedStretch, stretchRegion } from './stretch'
+import type { FormPos, KinPlan } from './kin'
+import { kinLane } from './kin'
 
 /**
  * MEMORY LAYERS — three things that make a woven track feel *remembered*:
@@ -29,6 +31,8 @@ export interface MemoryLayerParams {
   loop: number
   /** the motif's own seed — kept apart from the take seed so an album can quote it */
   motifSeed: number
+  /** TEXTURE KIN: the same texture from many sources, staged as drama */
+  kin?: KinPlan
 }
 
 export const LAYERS_OFF: MemoryLayerParams = { stretch: 0, motif: 0, ghosts: 0, loop: 0, motifSeed: 1 }
@@ -36,7 +40,7 @@ export const LAYERS_WEAVE = { stretch: 0.65, motif: 0.7, ghosts: 0.45, loop: 0.7
 
 /** any layer switched on? */
 export const layersActive = (p: MemoryLayerParams) =>
-  p.stretch > 0.02 || p.motif > 0.02 || p.ghosts > 0.02 || (p.loop ?? 0) > 0.02
+  p.stretch > 0.02 || p.motif > 0.02 || p.ghosts > 0.02 || (p.loop ?? 0) > 0.02 || (p.kin?.amt ?? 0) > 0.02
 
 /** per form section (DUST · SURFACING · THE MEMORY · DISSOLVING), and with no form */
 const STRETCH_W = [0.8, 0.5, 0.35, 0.9]
@@ -49,7 +53,7 @@ interface SourceLike {
   bed?: boolean
 }
 
-export type LayerKind = 'clouds' | 'melody' | 'ghosts' | 'loop'
+export type LayerKind = 'clouds' | 'melody' | 'ghosts' | 'loop' | 'kin'
 
 export interface LayerEnv {
   ctx: BaseAudioContext
@@ -68,6 +72,8 @@ export interface LayerEnv {
   sectionAt: (when: number) => number
   /** the form section around a context time, in context time; null without a form */
   sectionSpan?: (when: number) => { index: number; start: number; end: number } | null
+  /** seconds into the form (and its length) at a context time; null without a form */
+  formPos?: FormPos
   markUsed?: (sourceIdx: number, from: number, to: number) => void
   /** live: register sources so pause() can stop them */
   track?: (src: AudioBufferSourceNode) => void
@@ -166,7 +172,7 @@ export function makeMotif(seed: number): MotifNote[] {
 
 const regionCache = new WeakMap<AudioBuffer, Map<string, AudioBuffer>>()
 /** A copy of one region of a buffer, optionally reversed (small, cached). */
-function region(buffer: AudioBuffer, start: number, dur: number, reverse: boolean): AudioBuffer {
+export function region(buffer: AudioBuffer, start: number, dur: number, reverse: boolean): AudioBuffer {
   let m = regionCache.get(buffer)
   if (!m) regionCache.set(buffer, (m = new Map()))
   const key = `${start.toFixed(4)}:${dur.toFixed(4)}:${reverse ? 1 : 0}`
@@ -190,7 +196,7 @@ const C4 = 261.626
 const semisOf = (hz: number) => 12 * Math.log2(hz / C4)
 
 /** Rate that moves a pitched fragment onto the nearest chord / key tone (±6 st). */
-function snapRate(pitch: number | null, keyRoot: number, chord: Chord | null): number {
+export function snapRate(pitch: number | null, keyRoot: number, chord: Chord | null): number {
   if (!pitch) return 1
   const cur = semisOf(pitch)
   const pcs = chord ? chord.pcs : PENTA.map((d) => (d + keyRoot) % 12)
@@ -204,7 +210,7 @@ function snapRate(pitch: number | null, keyRoot: number, chord: Chord | null): n
   return bd > 6.5 ? 1 : Math.pow(2, (best - cur) / 12)
 }
 
-function voiceOut(env: LayerEnv, kind: LayerKind, when: number, pan: number, sendAmt: number, era: Era | undefined, src: AudioBufferSourceNode, rng: Rng, lowpass?: number) {
+export function voiceOut(env: LayerEnv, kind: LayerKind, when: number, pan: number, sendAmt: number, era: Era | undefined, src: AudioBufferSourceNode, rng: Rng, lowpass?: number) {
   const { ctx } = env
   let head: AudioNode = src
   if (era && era !== 'none') head = eraChain(ctx, head, src, era, rng, when)
@@ -242,6 +248,7 @@ export function memoryLanes(env: LayerEnv): Array<Generator<number, void, void>>
   if (params.motif > 0.02) lanes.push(motifLane(env))
   if (params.ghosts > 0.02) lanes.push(ghostLane(env))
   if ((params.loop ?? 0) > 0.02) lanes.push(loopLane(env))
+  if ((params.kin?.amt ?? 0) > 0.02) lanes.push(kinLane(env))
   return lanes
 }
 

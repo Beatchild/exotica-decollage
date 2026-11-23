@@ -875,7 +875,7 @@ export async function renderRaw(
       send.connect(revSend)
       return { dry, send }
     }
-    const buses = { clouds: bus('clouds'), melody: bus('melody'), ghosts: bus('ghosts'), loop: bus('loop') }
+    const buses = { clouds: bus('clouds'), melody: bus('melody'), ghosts: bus('ghosts'), loop: bus('loop'), kin: bus('kin') }
     const eras = engine.sources.filter((x) => !x.bed).map((x) => x.era ?? 'none')
     if (soloBus === null || soloBus === 'surface') startEraSurfaces(ctx, bus('surface').dry, eras, 0, seed)
     if (layersOn) {
@@ -893,6 +893,7 @@ export async function renderRaw(
         chordAt: chordAtT,
         sectionAt: (w) => (form ? sectionIndexAt(engine.songSections, w) : -1),
         sectionSpan: (w) => (form ? sectionSpanAt(engine.songSections, w) : null),
+        formPos: (w) => (form ? { t: w, total: engine.songSections.reduce((n, x) => n + x.sec, 0) } : null),
         markUsed,
       }))
     }
@@ -1059,6 +1060,7 @@ export function stemBuses(engine: AudioEngine): MixBus[] {
   if (ml.motif > 0.02) out.push('melody')
   if (ml.ghosts > 0.02) out.push('ghosts')
   if ((ml.loop ?? 0) > 0.02) out.push('loop')
+  if ((ml.kin?.amt ?? 0) > 0.02) out.push('kin')
   if (engine.sources.some((x) => !x.bed && x.era && x.era !== 'none')) out.push('surface')
   return out
 }
@@ -1067,7 +1069,7 @@ export function stemBuses(engine: AudioEngine): MixBus[] {
 function soloLayers(ml: MemoryLayerParams, bus: MixBus): MemoryLayerParams {
   const only: Partial<MemoryLayerParams> =
     bus === 'clouds' ? { stretch: ml.stretch } : bus === 'melody' ? { motif: ml.motif }
-      : bus === 'ghosts' ? { ghosts: ml.ghosts } : bus === 'loop' ? { loop: ml.loop } : {}
+      : bus === 'ghosts' ? { ghosts: ml.ghosts } : bus === 'loop' ? { loop: ml.loop } : bus === 'kin' ? { kin: ml.kin } : {}
   return { ...LAYERS_OFF, motifSeed: ml.motifSeed, ...only }
 }
 

@@ -16,6 +16,8 @@ import type { MoodKnobs } from '../engine/moods'
 import { MEMORY_SLOTS, buildMemoryForm, clearMemoryForm, gatherMemories, isMemoryForm, keyOf, scaleSections } from '../engine/memory'
 import { LAYERS_OFF, LAYERS_WEAVE } from '../engine/memoryLayers'
 import type { MemoryLayerParams } from '../engine/memoryLayers'
+import { arcByKey, contrastOf, findFamilies, makePlan } from '../engine/kin'
+import type { KinFamily, KinPlan } from '../engine/kin'
 import { isEra, suggestEras } from '../engine/eras'
 import { DEFAULT_CHAIN, MASTER_PRESETS, matchChain, toneProfile } from '../engine/mastering'
 import { measureLoudness } from '../engine/loudness'
@@ -99,6 +101,9 @@ export interface EngineState {
   /** its section lengths, seconds (empty when there is no form) */
   memorySecs: number[]
   memLayers: MemoryLayerParams
+  /** TEXTURE KIN: the families found in the material, and which play which role */
+  kinFamilies: Array<{ name: string; line: string; size: number; sources: number; perSource: Record<number, number> }>
+  kinRoles: number[]
   crates: string[]
   /** 0..1 while an offline render runs, else null */
   renderProgress: number | null
@@ -242,6 +247,8 @@ const snapshot = (f: Flags): EngineState => ({
   memoryForm: isMemoryForm(engine),
   memorySecs: isMemoryForm(engine) ? engine.songSections.map((x) => x.sec) : [],
   memLayers: { ...engine.memLayers },
+  kinFamilies: kinFams.map((f) => ({ name: f.name, line: f.line, size: f.ids.length, sources: f.sources.length, perSource: f.perSource })),
+  kinRoles: engine.memLayers.kin ? [...kinRoles] : [],
   crates,
   renderProgress: f.renderProgress,
   renderLabel: f.renderLabel,
@@ -572,8 +579,85 @@ function weaveInto(minutes: number, knobs: MoodKnobs, opts: WeaveOpts) {
   engine.memLayers = {
     ...(prev.stretch || prev.motif || prev.ghosts ? { ...prev, loop: prev.loop ?? LAYERS_WEAVE.loop } : { ...prev, ...LAYERS_WEAVE }),
     motifSeed: opts.motifSeed ?? (prev.motifSeed > 1 ? prev.motifSeed : randomSeed()),
+    kin: undefined, // a plain weave: no texture-kin lead
   }
   buildMemoryForm(engine, minutes)
+}
+
+
+// ---------- TEXTURE KIN ----------
+
+export interface KinOpts {
+  arc?: string
+  /** family indices (into the found families) for the main and contrast roles */
+  main?: number
+  contrast?: number
+  perSource?: number
+  weights?: Record<number, number>
+  key?: number
+  tension?: number[]
+  relay?: number
+  chorus?: number
+  amt?: number
+  motifSeed?: number
+  keepEras?: boolean
+}
+
+/** the families found in the material, for the KIN panel (same material → same families) */
+let kinFams: KinFamily[] = []
+let kinRoles: number[] = []
+const KIN_SEED = 1
+/** what the memory layers do under a KIN weave: the kin lead, the rest as atmosphere */
+const LAYERS_KIN = { stretch: 0.4, motif: 0.2, ghosts: 0.15, loop: 0.55 }
+
+function kinInto(minutes: number, knobs: MoodKnobs, o: KinOpts): boolean {
+  applyMoodTo(engine, 'memory', knobs) // re-slices long first: families and pins after
+  kinFams = findFamilies(engine.slices, engine.sources, KIN_SEED, o.perSource ?? 5, o.weights ?? {})
+  if (kinFams.length < 2) return false
+  const main = Math.min(kinFams.length - 1, Math.max(0, o.main ?? 0))
+  let contrast = o.contrast ?? -1
+  if (contrast < 0 || contrast === main || contrast >= kinFams.length) contrast = contrastOf(kinFams, main)
+  const third = contrastOf(kinFams, main, [contrast])
+  kinRoles = [main, contrast, third].filter((r) => r >= 0)
+  const arc = arcByKey(o.arc ?? 'classic')
+  const plan = makePlan(kinFams, kinRoles, arc, { amt: o.amt, relay: o.relay, chorus: o.chorus, tension: o.tension })
+  for (const sl of engine.slices) sl.pinned = false
+  engine.setPinned([...new Set(plan.families.flat())], true)
+  const pins = engine.pinnedSlices()
+  engine.setPinMode(pins.length >= 10 ? 'only' : 'favor')
+  engine.setKeyRoot(o.key ?? keyOf(pins))
+  if (!o.keepEras && engine.sources.every((x) => !x.era || x.era === 'none')) {
+    const live = engine.sources.map((x, i) => ({ x, i })).filter((q) => !q.x.bed)
+    const eras = suggestEras(live.map((q) => sourceCentroid(q.i)))
+    live.forEach((q, k) => (q.x.era = eras[k]))
+  }
+  const prev = engine.memLayers
+  engine.memLayers = {
+    ...(prev.kin ? { ...prev } : { ...prev, ...LAYERS_KIN }),
+    motifSeed: o.motifSeed ?? (prev.motifSeed > 1 ? prev.motifSeed : randomSeed()),
+    kin: plan,
+  }
+  buildMemoryForm(engine, minutes)
+  engine.songSections = scaleSections(arc.sections.map((x) => x * 1000), minutes)
+  return true
+}
+
+/**
+ * A drama for the album — where each track sits in the whole: a slow burn
+ * opens, the biggest wave comes at ~60 %, a fading choir closes; between
+ * them no two neighbours share an arc.
+ */
+function albumArcs(count: number): string[] {
+  if (count <= 1) return ['classic']
+  const peak = Math.round((count - 1) * 0.6)
+  const out: string[] = []
+  for (let i = 0; i < count; i++) {
+    let a = i === 0 ? 'slowburn' : i === count - 1 ? 'fading' : i === peak ? 'waves' : ['classic', 'slowburn', 'classic', 'waves'][i % 4]
+    if (i !== peak && i !== 0 && i !== count - 1 && (a === out[i - 1] || (i === peak - 1 && a === 'waves'))) a = out[i - 1] === 'classic' ? 'slowburn' : 'classic'
+    if (i === peak && out[i - 1] === 'waves') out[i - 1] = 'classic'
+    out.push(a)
+  }
+  return out
 }
 
 /** Bridges the imperative AudioEngine singleton into React state. */
@@ -2156,6 +2240,129 @@ export function useAudioEngine() {
     sync()
   }, [sync])
 
+  // ---------- TEXTURE KIN ----------
+
+  /**
+   * TEXTURE KIN: group every source's fragments into texture families, take
+   * the main family + a contrasting one (+ a third for the peak), balanced
+   * across sources, and stage them along a dramatic arc — then play.
+   */
+  const weaveKin = useCallback((minutes: number, knobs: MoodKnobs, o: KinOpts = {}) => {
+    if (engine.slices.length === 0) return
+    if (!kinInto(minutes, knobs, o)) {
+      toast('error', 'Not enough material to find texture families — add more sources (or longer ones).')
+      return
+    }
+    engine.reset()
+    engine.play()
+    engine.playSong(false)
+    const plan = engine.memLayers.kin!
+    const n = new Set(plan.families.flat().map((id) => engine.slices[id]?.sourceIdx)).size
+    toast('success', `${plan.names.join(' · ')} — ${plan.families.flat().length} fragments from ${n} sources, staged as ${arcByKey(plan.arc).label}, in ${NOTE_NAMES[engine.keyRoot]}.`)
+    sync()
+    if (engine.memLayers.stretch > 0.02) void engine.prepareMemory().then(() => sync()).catch(() => {})
+  }, [sync])
+
+  /** Change the kin plan in place (level, relay, chorus, drawn tension). */
+  const setKin = useCallback((p: Partial<KinPlan>) => {
+    const k = engine.memLayers.kin
+    if (!k) return
+    engine.setMemoryLayers({ kin: { ...k, ...p } })
+    sync()
+  }, [sync])
+
+  /** Another dramatic arc for the same families: acts, tension and the form's proportions. */
+  const setKinArc = useCallback((key: string, minutes: number) => {
+    const k = engine.memLayers.kin
+    if (!k) return
+    const arc = arcByKey(key)
+    if (isMemoryForm(engine)) engine.songSections = scaleSections(arc.sections.map((x) => x * 1000), minutes)
+    engine.setMemoryLayers({ kin: { ...k, arc: arc.key, acts: arc.acts.map((a) => ({ ...a, fams: [...a.fams] })), tension: [...arc.tension] } })
+    if (engine.songActive) engine.playSong(false)
+    sync()
+  }, [sync])
+
+  /**
+   * KIN ALBUM: every track a different texture family in the lead (the last
+   * returns to the first one's), each on its own dramatic arc chosen for its
+   * place in the album (slow burn → … → the peak → fading choir), in related
+   * keys, the whole album rising and falling. Replaces the album plan (the
+   * old one is kept as a backup).
+   */
+  const weaveKinAlbum = useCallback((o: {
+    count: number; minutes: number; knobs: MoodKnobs; perSource: number; weights: Record<number, number>; title?: string
+  }) => {
+    if (engine.slices.length === 0) return
+    const snap = capturePatch()
+    const wasPlaying = engine.playing
+    engine.pause()
+    applyMoodTo(engine, 'memory', o.knobs)
+    const fams = findFamilies(engine.slices, engine.sources, KIN_SEED, o.perSource, o.weights)
+    if (fams.length < 2) {
+      applyPatch(snap)
+      if (wasPlaying) engine.play()
+      toast('error', 'Not enough material to find texture families — add more sources (or longer ones).')
+      sync()
+      return
+    }
+    const rng = mulberry32(randomSeed())
+    const home = keyOf(fams.flatMap((f) => f.ids).map((id) => engine.slices[id]).filter(Boolean))
+    const motifHome = Math.floor(rng() * 1e6) + 2
+    const KEY_PATH = [0, 7, 2, 9, 5, 10, 3, 8, 4, 11, 6, 1]
+    const titles = shuffle([...ALBUM_TITLES], rng)
+    const leads = fams.map((_, i) => i).slice(0, Math.max(1, Math.min(fams.length, o.count - 1)))
+    const arcs = albumArcs(o.count)
+    const tracks: Array<Record<string, unknown>> = []
+    const lines: string[] = []
+    for (let i = 0; i < o.count; i++) {
+      const last = i === o.count - 1 && o.count > 1
+      const swell = o.count > 1 ? Math.sin((Math.PI * i) / (o.count - 1)) : 1 // the album's own arc
+      const arc = arcByKey(arcs[i])
+      const main = last ? leads[0] : leads[i % leads.length]
+      const knobs: MoodKnobs = {
+        darkness: clamp01(o.knobs.darkness - 0.12 + swell * 0.3 + (rng() - 0.5) * 0.08),
+        space: clamp01(o.knobs.space + swell * 0.15 + (rng() - 0.5) * 0.1),
+        motion: clamp01(o.knobs.motion + (swell - 0.5) * 0.2),
+      }
+      const minutes = Math.max(2, Math.round(o.minutes * (0.8 + rng() * 0.45) * 2) / 2)
+      const seed = randomSeed()
+      clearMemoryForm(engine)
+      engine.reseed(seed)
+      kinInto(minutes, knobs, {
+        arc: arc.key, main, perSource: o.perSource, weights: o.weights,
+        key: (home + (last ? 0 : KEY_PATH[i % KEY_PATH.length])) % 12,
+        tension: arc.tension.map((v) => clamp01(v * (0.7 + 0.3 * swell))),
+        chorus: 0.5 + 0.5 * swell,
+        relay: 0.5 + rng() * 0.4,
+        motifSeed: i === 0 || last ? motifHome : motifHome + i * 17,
+        keepEras: true,
+      })
+      const title = titles[i % titles.length] + (i >= titles.length ? ` ${Math.floor(i / titles.length) + 1}` : '')
+      lines.push(`${i + 1}. ${title} — ${fams[main].name} · ${arc.label}`)
+      tracks.push({ title, seed, preset: null, minutes, include: true, patch: capturePatch() })
+    }
+    applyPatch(snap)
+    if (wasPlaying) engine.play()
+    const KEY = 'exotica.album.v1'
+    try {
+      const raw = localStorage.getItem(KEY)
+      if (raw) localStorage.setItem(KEY + '.backup', raw)
+      const old = raw ? JSON.parse(raw) : {}
+      localStorage.setItem(KEY, JSON.stringify({
+        ...old,
+        title: o.title?.trim() || old.title || 'Kin',
+        artist: old.artist ?? '',
+        targetLufs: old.targetLufs ?? loudnessTarget,
+        tracks,
+      }))
+      console.info('KIN ALBUM\n' + lines.join('\n'))
+      toast('success', `Kin album: ${tracks.length} tracks, each led by another texture family on its own arc, around ${NOTE_NAMES[home]}; the last returns to the first. Open ALBUM to listen and render (the previous plan is kept as a backup).`)
+    } catch {
+      toast('error', 'Could not save the album plan (browser storage unavailable).')
+    }
+    sync()
+  }, [sync])
+
   const setKeyRoot = useCallback((pc: number) => {
     engine.setKeyRoot(pc)
     sync()
@@ -2385,6 +2592,10 @@ export function useAudioEngine() {
     sketchArrangement,
     weaveMemory,
     weaveAlbum,
+    weaveKin,
+    setKin,
+    setKinArc,
+    weaveKinAlbum,
     setMemoryMinutes,
     setMemorySecs,
     playMemory,
