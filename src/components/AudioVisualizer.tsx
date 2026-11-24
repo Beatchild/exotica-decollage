@@ -3,6 +3,7 @@ import type { MutableRefObject } from 'react'
 import type { SourceRec } from '../engine/AudioEngine'
 import type { Slice } from '../engine/types'
 import type { ActiveFire } from '../hooks/useAudioEngine'
+import { SLICE_MIME } from '../ui/dnd'
 
 const CHARCOAL = '#1A1A1A'
 const BURNT = '#D35400'
@@ -30,6 +31,12 @@ interface Props {
   getPreviewPos: () => { idx: number; sec: number } | null
   getPhraseInfo: () => { sourceIdx: number; start: number; dur: number; sec: number } | null
   onRegionArrange: (sourceIdx: number, regions: Array<{ start: number; dur: number }>) => void
+  /** Shift+click: pin / unpin a dot for the composition */
+  onTogglePin?: (id: number) => void
+  /** Alt+click: pin a dot and its closest timbral neighbours */
+  onPinSimilar?: (id: number) => void
+  /** double-click: append the dot to an ARRANGE track (no drag needed) */
+  onSendToArrange?: (id: number, track: number) => void
 }
 
 const peaksCache = new WeakMap<AudioBuffer, { key: string; peaks: Array<[number, number]> }>()
@@ -82,7 +89,12 @@ export function AudioVisualizer({
   getPreviewPos,
   getPhraseInfo,
   onRegionArrange,
+  onTogglePin,
+  onPinSimilar,
+  onSendToArrange,
 }: Props) {
+  // which ARRANGE track a double-clicked dot lands on
+  const [sendTrack, setSendTrack] = useState(0)
   // mouse-selected waveform regions, in seconds of the selected source
   const [regions, setRegions] = useState<Array<{ a: number; b: number }>>([])
   const regionsRef = useRef(regions)
@@ -113,6 +125,7 @@ export function AudioVisualizer({
       r: 2.5 + Math.min(6, s.rms * 60),
       cat: s.category,
       sourceIdx: s.sourceIdx,
+      pinned: !!s.pinned,
     }))
   }, [slices])
 
@@ -310,8 +323,22 @@ export function AudioVisualizer({
           g.beginPath()
           g.arc(px(p.x), py(p.y), active ? p.r + 3 : p.r, 0, Math.PI * 2)
           g.fillStyle = active ? BURNT : CAT_COLOR[p.cat]
-          g.globalAlpha = active ? 1 : fromSelected ? 0.8 : 0.35
+          g.globalAlpha = active ? 1 : p.pinned ? 1 : fromSelected ? 0.8 : 0.35
           g.fill()
+          if (p.pinned) {
+            // pinned: a firm double ring — these are what the composition favours
+            g.globalAlpha = 1
+            g.lineWidth = 2
+            g.strokeStyle = BURNT
+            g.beginPath()
+            g.arc(px(p.x), py(p.y), p.r + 4, 0, Math.PI * 2)
+            g.stroke()
+            g.lineWidth = 1
+            g.strokeStyle = CHARCOAL
+            g.beginPath()
+            g.arc(px(p.x), py(p.y), p.r + 7, 0, Math.PI * 2)
+            g.stroke()
+          }
           if (active) {
             g.beginPath()
             g.arc(px(p.x), py(p.y), p.r + 8, 0, Math.PI * 2)
@@ -553,8 +580,23 @@ export function AudioVisualizer({
         style={{ background: CREAM }}
       >
         <div className="px-3 py-1.5 text-[10px] tracking-[0.2em] border-b border-charcoal/30 flex justify-between">
-          <span>TIMBRE MAP — CLICK: AUDITION · RIGHT-CLICK: RECLASSIFY</span>
-          <span className="flex gap-3">
+          <span title="Pinned dots (double ring) are what the composition draws on — see COMPOSE">
+            TIMBRE MAP — CLICK: LISTEN · DOUBLE-CLICK: → ARRANGE · SHIFT-CLICK: PIN · ALT-CLICK: PIN + SIMILAR · DRAG: TO ARRANGE / PIN STRIP · RIGHT-CLICK: RECLASSIFY
+          </span>
+          <span className="flex gap-3 items-center">
+            {onSendToArrange && (
+              <span className="flex items-center gap-0.5" title="Double-click a dot: it is appended to the end of this ARRANGE track">
+                <span className="opacity-60 mr-0.5">→ ARRANGE</span>
+                {[0, 1, 2, 3].map((t) => (
+                  <button key={t} onClick={() => setSendTrack(t)}
+                    className="px-1 border border-charcoal/50 text-[8px]"
+                    style={sendTrack === t ? { background: CHARCOAL, color: CREAM } : undefined}
+                    aria-pressed={sendTrack === t}>
+                    T{t + 1}
+                  </button>
+                ))}
+              </span>
+            )}
             <span style={{ color: BURNT }}>● TRANSIENT</span>
             <span style={{ color: CHARCOAL }}>● HARMONIC</span>
             <span style={{ color: '#8A7F72' }}>● TEXTURE</span>
@@ -565,9 +607,40 @@ export function AudioVisualizer({
           <canvas
             ref={scatterRef}
             className="absolute inset-0 w-full h-full cursor-crosshair"
+            draggable
+            onDragStart={(e) => {
+              const hit = hitScatterPoint(e)
+              if (!hit) {
+                e.preventDefault() // only dots are draggable
+                return
+              }
+              e.dataTransfer.setData(SLICE_MIME, JSON.stringify([hit.id]))
+              e.dataTransfer.setData('text/plain', `slice #${hit.id}`)
+              e.dataTransfer.effectAllowed = 'copy'
+              // a small dot as the drag image instead of the whole canvas
+              const p = scatterPoints.find((q) => q.id === hit.id)
+              const ghost = document.createElement('canvas')
+              ghost.width = ghost.height = 28
+              const g = ghost.getContext('2d')!
+              g.fillStyle = p ? CAT_COLOR[p.cat] : BURNT
+              g.beginPath()
+              g.arc(14, 14, 9, 0, Math.PI * 2)
+              g.fill()
+              g.strokeStyle = BURNT
+              g.lineWidth = 2
+              g.stroke()
+              e.dataTransfer.setDragImage(ghost, 14, 14)
+            }}
             onClick={(e) => {
               const hit = hitScatterPoint(e)
-              if (hit) onAudition(hit.id)
+              if (!hit) return
+              if (e.shiftKey && onTogglePin) onTogglePin(hit.id)
+              else if (e.altKey && onPinSimilar) onPinSimilar(hit.id)
+              else onAudition(hit.id)
+            }}
+            onDoubleClick={(e) => {
+              const hit = hitScatterPoint(e)
+              if (hit && onSendToArrange) onSendToArrange(hit.id, sendTrack)
             }}
             onContextMenu={(e) => {
               e.preventDefault()

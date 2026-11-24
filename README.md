@@ -83,8 +83,195 @@ explicit gesture per browser autoplay policy), then **▶**.
 - **Keyboard performance** — click a timbre-map dot to arm it, then play it
   chromatically from the home row (A–L; Shift = octave down). Space = play,
   R = record, 1–4 = scenes.
-- **Album mode** — N tracks batch-rendered with derived seeds, each with its
-  own deterministic sleeve PNG.
+- **Album builder** (ALBUM button) — a tracklist where each row is a track:
+  title, character (studio sound or one of the one-click presets), length,
+  seed. ▶ auditions a row live, 🎲 rerolls it; RENDER ALBUM writes ONE zip:
+  `NN Title.wav` (loudness-matched), a sleeve per track, `cover.png` and
+  `tracklist.txt` with LUFS / true peak. The plan persists in localStorage
+  and the studio patch is restored when the panel closes (`album.ts`,
+  `AlbumPanel.tsx`, store-only zip in `zip.ts`).
+- **Pinned dots** — Shift-click a timbre-map dot (or drag it into the
+  COMPOSE pin strip) to pin it; Alt-click pins a dot plus its four closest
+  sound-alikes. MATERIAL decides how pins steer the generative voices:
+  ALL SLICES (ignored) · FAVOUR PINNED (pinned dots repeated until they are
+  about half of every voice's choices — measured ~70% of events from 6% of
+  the pool) · PINNED ONLY (nothing else plays). Deterministic, so seeded
+  renders still repeat; pins survive boundary edits / FRAG re-slicing by
+  position. Dragging a dot (or DRAG ALL) onto an ARRANGE track places that
+  exact slice there, beat-snapped, several end to end. Without dragging:
+  double-click a dot on the TIMBRE MAP (it is appended to the end of the
+  track picked with → ARRANGE T1–T4 in the map's header), or click T1–T4 on
+  the pin strip's ALL → ARRANGE to append every pinned dot. In the desktop
+  app the window's native file-drop is off (`dragDropEnabled: false`) so
+  these in-page drags reach the timeline.
+- **ARRANGE → RENDER WAV** — the arrangement offline, faster than real time:
+  its clips (track gain / pan / mute / solo, clip gain and fades) through the
+  same master chain, sub-octave and loudness mastering as RENDER, plus a 4 s
+  tail. BOUNCE still records one live real-time pass, unmastered.
+- **COMPOSE** (`ComposePanel.tsx`, `moods.ts`) — the short way to a sound:
+  1 material (pins) · 2 mood (EERIE · MYTHIC · HAUNTED RITUAL · SUNKEN
+  TEMPLE — whole desk settings for drones, ghosts, rituals) · 3 three knobs,
+  live: DARKNESS / SPACE / MOTION · 4 keep it: LISTEN, ANOTHER TAKE (seed),
+  SKETCH TO ARRANGE (lays the pinned dots out as a 4/8/16-bar piece across
+  the four tracks), RENDER, + ALBUM (stores the exact patch with the track,
+  so the album renders that sound even after the studio has moved on).
+- **MEMORY WEAVE** (`memory.ts`, top of COMPOSE) — one button, one haunted,
+  tonal track from every source: it pins the warmest, most clearly pitched
+  fragments of each source (3–12 per source, spread across each file, one soft
+  texture for air), reads the key from those fragments only, applies the
+  FORGOTTEN MEMORY mood (pentatonic choir-pads, a lullaby line, old tape) and
+  lays out a four-part form in scene slots E–H — DUST → SURFACING → THE
+  MEMORY → DISSOLVING — timed to the MIN length, played from the top and
+  rendered the same way. KEY ◀ ▶ retunes it; pin/unpin dots by hand and KEEP
+  FRAGMENTS, REBUILD. + ALBUM stores the form, its scenes and the pins with the
+  track (patches now carry `sg` / `scn` / `pins`).
+  - **Sources** — a weight per source (OFF … 2×: how many of its fragments are
+    gathered) and an **era** per source (`eras.ts`): VINYL · CASSETTE · VHS ·
+    AM RADIO · TELEPHONE. Every fragment of that source is coloured by the
+    medium (band limits, resonance, saturation, wow/flutter as detune) and each
+    medium in use lays its surface under the mix (crackle, hiss, mains hum,
+    static). The first weave suggests a different medium per source, darkest
+    on vinyl, brightest on radio.
+  - **Memory layers** (`memoryLayers.ts`, live and in renders):
+    STRETCH — the most tonal fragments PaulStretch-ed (`stretch.ts`, chunked
+    FFT, cached) into 18 s clouds, snapped to the key, strongest in DUST and
+    DISSOLVING; RETURNING MELODY — one pentatonic motif played on the clearest
+    pitched fragment: far and partial in SURFACING, whole in THE MEMORY, back
+    slower, sinking and partly backwards in DISSOLVING (ANOTHER MELODY = new
+    motif seed); MELODIC LINES (`lines.ts`) — several melodies at once, in
+    the exotica / hauntology manner, each on its own pitched fragment of the
+    material: a LEAD in periods (A asks · A′ answers · B quotes the returning
+    motif · A″ comes home; chord tones on strong beats, occasional glides), an
+    OSTINATO (the chord broken in eighths with vibraphone-motor tremolo), a
+    COUNTER-line below moving against the lead (amount ≥ 45) and BELL echoes of
+    the lead's last notes an octave up (≥ 70); the mode (lydian, dorian,
+    mixolydian, pentatonic, harmonic minor, major) follows the melody seed.
+    DUST: only the ostinato, far · SURFACING: the lead half-heard · THE MEMORY:
+    all of it · DISSOLVING: slower, with gaps, some backwards. MELODY bus and
+    stem; GHOST VOICES — the most voice-like fragments, behind a wall or
+    down a phone line, sometimes reversed, with an echo.
+  - **Live form** — a playhead on the section bar; click a section to play from
+    it; drag a seam to re-proportion (kept when the length or knobs change).
+  - **3 TAKES** — three seeds of the same weave; ▶ START or ▶ HEART (jump to THE
+    MEMORY) each, KEEP the one you want.
+  - **WEAVE ALBUM** — 4–12 tracks from the same material: each leans on a
+    different source, keys walk the circle of fifths from the home key and the
+    last track returns home and quotes the first one's melody, darkness follows
+    a light → dark → light arc; titles are suggested. Replaces the album plan
+    (previous plan kept under `exotica.album.v1.backup`). Patches carry the
+    layers (`ml`) and eras (`era`).
+- **TEXTURE KIN** (`engine/kin.ts`, `KinWeave.tsx`, COMPOSE → ADVANCED) — the
+  same texture found in many recordings, staged as drama:
+  - **Families** — every usable fragment of every source is fingerprinted
+    (brightness, noise, attack, length, pitch clarity) and clustered (seeded
+    k-means) into named families of kin (WARM BREATH, GLASS HISS, DARK
+    KNOCKS…), whatever source they came from. Each family takes the few most
+    typical fragments *per source* (× the WEAVE source weights), so ten sources
+    really mix; fragments are evened to the family's median loudness and keep
+    their source's medium (era).
+  - **Roles** — a LEAD family, an ANSWER (the most contrasting one) and a third
+    for the peak; any family can be made LEAD or ANSWER from its card.
+  - **Arcs** — CLASSIC (exposition → rising → climax → falling → coda), TWO
+    WAVES, SLOW BURN, FADING CHOIR. Each act has a mode: *speak* (one source at
+    a time, the same gesture handed on — one voice, many mouths), *dialog*
+    (two families answer each other), *chorus* (every source at once, a breath
+    apart, each in its own fixed place in the stereo field), *lone* (one source
+    alone). A drawable **tension curve** drives density, brightness, register,
+    how many sources sound at once and how far the intervals stray. RELAY and
+    CHORUS sliders; its own MIX bus (KIN), stem and MIDI targets.
+  - **KIN ALBUM** — every track led by a different family (the last returns to
+    the first one's), each on an arc chosen for its place (slow burn first, the
+    biggest wave at ~60 %, a fading choir last, no two neighbours alike),
+    related keys, the album's intensity rising and falling. Replaces the album
+    plan (previous plan kept as backup). The plan lives in `ml.kin`, so it
+    renders, stems and saves in patches like the other layers.
+- **MIX & MASTER** (`MixMasterPanel.tsx`, `mastering.ts`, Alt+6) — the
+  finishing stage:
+  - **MIX** — five bus faders (−∞ … +6 dB, double-click = 0 dB): VOICES (the
+    generative desk + chimes), CLOUDS, MELODY, GHOSTS, SURFACE. Each bus scales
+    its dry signal and its reverb send together; live and in renders; saved in
+    every patch (`mx`), so album tracks keep their balance.
+  - **MASTER** — a release chain: low cut (24 dB/oct) → mono bass (sides
+    high-passed) → warmth (140 Hz shelf) → mud cut (320 Hz bell) → air (9 kHz
+    shelf) → glue (stereo-linked RMS compressor, threshold relative to the
+    programme) → tape (level-referenced tanh) → width. Presets: TRANSPARENT ·
+    WARM TAPE · CLEAR STREAMING · DARK AMBIENT · VINYL CUT. It is heard live
+    (native-node twin between the studio and the speakers; meters read after
+    it) and MASTER ON/OFF is the A/B switch — what you hear is what exports.
+    Every export (single, loop, album) runs the chain in the mastering worker
+    before LUFS normalization, true-peak limiting and dither. Saved across
+    sessions (`exotica.master.v1`) — it belongs to the release, not a track.
+  - **FINISH** — loudness target, format, length, RENDER FINAL MASTER, and the
+    last export's integrated loudness / true peak.
+  - **EXACT PREVIEW** — 30 s (THE HEART or THE START) rendered offline and
+    mastered by the export code itself, played straight to the speakers;
+    A · MASTERED / B · UNMASTERED (level-matched, so the A/B compares tone).
+  - **MATCH A REFERENCE** — load a finished track: its middle minute and 30 s
+    of your pre-master mix are profiled (band balance <150 · 150–500 · 500–4k ·
+    >4k Hz, side energy, low-end mono-ness, peak-to-loudness); the chain's
+    warmth / mud / air / width / glue / mono bass and the loudness target are
+    set to land near it, with a short report.
+  - **RELEASE KIT** — one ZIP: the final master WAV (1000 px cover in its ID3),
+    `cover-3000.jpg` drawn from the material (the fragments' timbre map as a
+    cloud of light, reel rings, scratches, grain), `release.txt` (Bandcamp ·
+    distributor fields · YouTube description with the form's chapters) and
+    `samples.txt`. Optional: a 1280×720 WebM for YouTube, recorded in real
+    time (keep the tab visible). Album ZIPs now get `release.txt` and a
+    generated cover when none is uploaded.
+  - **MIDI CONTROL** — Web MIDI with MIDI LEARN: DARKNESS / SPACE / MOTION,
+    every MIX fader, the four memory layers, MASTER on/off, play/pause and
+    WEAVE. Mappings persist (`exotica.midi.v1`).
+- **DISINTEGRATING TAPE** (memory layer, LOOP bus) — in DISSOLVING one phrase
+  loops; every pass the tape sheds more: holes open and never heal, the top
+  darkens, the speed sags ~7 %, until only fragments remain (without a form: a
+  60–90 s disintegration now and then). Measured: −15 → −42 dB across the
+  section.
+- **Stems** now include the memory buses that sound (`memory-clouds`,
+  `-melody`, `-ghosts`, `-loop`, `-surface`).
+- **Stretch clouds** are computed in a worker (`stretch.worker.ts`), with the
+  chunked main-thread path as fallback.
+- **SIMPLE / ADVANCED** (COMPOSE) — SIMPLE keeps weave, mood, three knobs,
+  listen / render / + album; ADVANCED shows sources & eras, layers, pins,
+  takes, album weave and sketch.
+- **UNDO** — Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y): whole-studio snapshots (patch +
+  master) taken when the state settles; song morphs and drift don't count.
+- **Release-ready WAVs** — 24-bit or 16-bit (TPDF-dithered), 44.1 or
+  48 kHz (EXPORT menu / album RELEASE settings). Every export is tagged twice:
+  RIFF `LIST/INFO` (Explorer, DAWs) and an ID3v2.4 `id3 ` chunk (players,
+  taggers) — title, artist, album, track n/N, year, seed, and embedded cover
+  art (the track's sleeve, or your own uploaded PNG/JPEG cover).
+- **Album transitions** — SEPARATE TRACKS (fade in/out per track) or
+  GAPLESS: each track renders a few seconds long and that overhang
+  equal-power-crossfades into the next track's head, so the files play as
+  one continuous piece; album fade-in/out only at the two ends.
+- **Sample provenance** (`provenance.ts`) — every pool source records where
+  it came from: bundled stems (in-app, nothing to clear), uploads, mic takes,
+  sonified images, resamples, and YouTube cuts with the exact timestamp of
+  each window in the original video (also through region cuts/splices and
+  crates). Renders log which stretches of which source they actually played;
+  album zips add `samples.txt` + `samples.json` mapping every track back to
+  original recordings and time ranges, for clearance. EXPORT → SAMPLE REPORT
+  gives the same for a single render.
+- **Navigation** — sticky top bar (transport · meter · EXPORT menu · ALBUM ·
+  search · help), section tabs that follow the scroll (Alt+1–4), collapsible
+  sections that remember their state, a Ctrl/⌘+K command palette with every
+  action (renders, characters, scenes, stems, settings), a `?` help overlay,
+  and non-blocking toasts instead of `alert()` popups (`src/ui/`).
+- **Stopping renders** — every render (RENDER / STEMS / LOOP / REMIX /
+  ALBUM / arrangement BOUNCE) has a STOP button next to its progress bar,
+  and Esc stops it from anywhere. Cancelled renders save nothing and free
+  the CPU at once (the OfflineAudioContext is left suspended, the mastering
+  worker is terminated). The album adds finer control: SKIP TRACK (drop the
+  current one, keep going), STOP AFTER THIS TRACK, STOP NOW · KEEP FINISHED
+  (zips what is done), CANCEL ALL (saves nothing); rows can be unticked to
+  leave them out, ⬇ on a row exports just that track, and the output can be
+  one .zip or separate WAVs.
+- **Loudness** — BS.1770-4 integrated LUFS, short-term max and 4×
+  oversampled true peak (`loudness.ts`). RENDER / LOOP / REMIX / ALBUM are
+  normalized to the header's target (−14 streaming default, −16, −23, −9,
+  or off) with a look-ahead limiter holding true peak ≤ −1 dBTP; STEMS are
+  never normalized. The header meter shows live momentary / short-term /
+  integrated LUFS of the master.
 - **Portable crates** — export/import the pool as a `.crate` file (binary:
   JSON header + raw Float32 audio) alongside per-browser IndexedDB saves.
 - **Radio mode** — endless background stream: reseed + bundled-stem rotation
@@ -95,6 +282,28 @@ explicit gesture per browser autoplay policy), then **▶**.
   YouTube/Freeze material only: each gets its own seed, random macros, scale,
   groove and duck (RenderOpts overrides keep engine state untouched, so the
   OfflineAudioContexts genuinely run concurrently — ~1.6x over sequential).
+
+## Staying responsive
+
+- Source analysis (Meyda features, onset detection, per-slice pitch) runs in
+  a Web Worker pool (`analysis.worker.ts` / `analyzeAsync.ts`), so long
+  uploads and YouTube collages no longer lock the UI. Pitch autocorrelation
+  is 2×-decimated with parabolic refinement (~4× cheaper).
+- Offline renders schedule voices as generators in 10s windows driven by
+  `OfflineAudioContext.suspend()`, instead of building every node of a
+  20-minute track up front; `onProgress` feeds the header progress bar.
+- Loudness, limiting, WAV encoding and the zip CRC run in
+  `master.worker.ts`.
+- Presets only re-slice the pool when the fragment regime actually changes.
+- **Smooth live playback** — every live voice keeps a cursor on the audio
+  clock and is scheduled 1.2 s ahead (`drive()` in `AudioEngine.ts`); timers
+  only refill, so the rhythm is sample-exact and a busy main thread (React, GC,
+  a weave) or a throttled background window has ~0.8 s of slack. Measured:
+  0 late events with the main thread blocked 500 ms every 2 s. Fired-event UI
+  highlights are delayed to when they actually sound. The AudioContext uses
+  `latencyHint: 'playback'` (a larger output buffer: no crackle under load).
+- Era surface noise (crackle, hiss, hum) is generated in `eras.worker.ts` and
+  fades in when ready; offline renders wait for it.
 
 ## Desktop app (Tauri)
 

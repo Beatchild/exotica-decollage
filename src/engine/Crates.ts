@@ -1,3 +1,4 @@
+import type { SourceOrigin } from './provenance'
 import type { AudioEngine } from './AudioEngine'
 
 /**
@@ -16,6 +17,8 @@ interface StoredSource {
   channels: ArrayBuffer[]
   bounds: number[]
   manual: boolean
+  /** provenance (absent in crates saved before it existed) */
+  origin?: SourceOrigin
 }
 
 interface Crate {
@@ -58,6 +61,7 @@ export async function saveCrate(name: string, engine: AudioEngine): Promise<void
       }),
       bounds: [...s.bounds],
       manual: s.manual,
+      origin: s.origin,
     })),
   }
   await tx('readwrite', (store) => store.put(crate, name))
@@ -71,7 +75,7 @@ export async function loadCrate(name: string, engine: AudioEngine): Promise<numb
     const first = new Float32Array(s.channels[0])
     const buf = engine.ctx.createBuffer(s.channels.length, first.length, s.sampleRate)
     s.channels.forEach((ch, i) => buf.getChannelData(i).set(new Float32Array(ch)))
-    engine.restoreSource(s.name, buf, s.stemKey, s.bounds, s.manual)
+    await engine.restoreSource(s.name, buf, s.stemKey, s.bounds, s.manual, s.origin)
   }
   return crate.sources.length
 }
@@ -104,6 +108,7 @@ export function exportCrateFile(engine: AudioEngine): Blob {
       length: s.buffer.length,
       bounds: [...s.bounds],
       manual: s.manual,
+      origin: s.origin,
     })),
   }
   // pad the JSON to 4-byte alignment so Float32Array views land aligned
@@ -137,7 +142,7 @@ export async function importCrateFile(file: File, engine: AudioEngine): Promise<
       buf.getChannelData(ch).set(new Float32Array(data, off, s.length))
       off += s.length * 4
     }
-    engine.restoreSource(s.name, buf, s.stemKey, s.bounds, s.manual)
+    await engine.restoreSource(s.name, buf, s.stemKey, s.bounds, s.manual, s.origin)
   }
   return header.sources.length
 }

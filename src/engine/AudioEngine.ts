@@ -1,8 +1,12 @@
 import * as Tone from 'tone'
 import { Arranger } from './Arranger'
 import { DSPChain } from './DSPChain'
-import { analyzeSource, buildSlices, detectBounds } from './Slicer'
+import { buildSlices } from './Slicer'
 import type { SourceAnalysis } from './Slicer'
+import { analyzeAsync } from './analyzeAsync'
+import { LoudnessMeter } from './loudness'
+import { STEM_ORIGIN, cutOrigin, spliceOrigin } from './provenance'
+import type { OriginSeg, SourceOrigin } from './provenance'
 import { WavRecorder } from './WavRecorder'
 import { BUNDLED_STEMS, renderSurfaceNoise } from './stems'
 import { genV1Cycle, genV2Step, genV3Step, genV5Cell, genV7Phrase, grooveNext } from './generate'
@@ -14,6 +18,27 @@ import { buildInterleave, buildMixtape, extractHighlights, trackCharacter } from
 import { encodeWav } from './WavRecorder'
 import { ytFetchAudio } from './ytBridge'
 import { mulberry32, randomSeed } from './rng'
+import { eraChain, ensureEraSurfaces, eraSurfaceReady, startEraSurfaces } from './eras'
+import type { Era } from './eras'
+import { LAYERS_OFF, layersActive, memoryLanes, prepareStretches, sectionIndexAt, sectionSpanAt } from './memoryLayers'
+import type { MemoryLayerParams } from './memoryLayers'
+import { isMemoryForm } from './memory'
+import { DEFAULT_CHAIN, LiveMaster } from './mastering'
+import type { MasterChain } from './mastering'
+
+/** MIX faders (linear gain): generative voices and the memory buses */
+export interface MixLevels {
+  voices: number
+  clouds: number
+  melody: number
+  ghosts: number
+  loop: number
+  kin: number
+  surface: number
+}
+export const MIX_DEFAULT: MixLevels = { voices: 1, clouds: 1, melody: 1, ghosts: 1, loop: 1, kin: 1, surface: 1 }
+export const MIX_BUSES = ['clouds', 'melody', 'ghosts', 'loop', 'kin', 'surface'] as const
+export type MixBus = (typeof MIX_BUSES)[number]
 import type { Rng } from './rng'
 import {
   NOISE_VOICE,
@@ -23,6 +48,7 @@ import type {
   FiredEvent,
   LoopCell,
   MacroParams,
+  PinMode,
   ScaleName,
   Scene,
   Slice,
@@ -32,6 +58,15 @@ import type {
 } from './types'
 
 const LOOKAHEAD = 0.12 // seconds of scheduling headroom
+/**
+ * Look-ahead scheduling: each voice keeps a cursor on the audio clock and is
+ * filled AHEAD seconds in advance; its timer wakes WAKE seconds before the
+ * cursor runs out. Rhythm is sample-exact (cursors chain, timers only refill),
+ * and a busy main thread (React, GC, a weave) or a throttled background window
+ * (timers at 1 s) has ~0.8 s of slack before anything is late.
+ */
+const AHEAD = 1.2
+const WAKE = 0.8
 const MAX_SOURCES = 6
 
 export interface SourceRec {
@@ -47,6 +82,10 @@ export interface SourceRec {
   /** ambience bed: loops continuously, heavily filtered, under everything */
   bed?: boolean
   slices: Slice[] // ids/sourceIdx patched by rebuildSlices()
+  /** where this material came from (for the release sample report) */
+  origin?: SourceOrigin
+  /** old-medium colouring for this source (MEMORY WEAVE eras) */
+  era?: Era
 }
 
 const defaultVoice = (level = 0.8): VoiceParams => ({
@@ -78,6 +117,17 @@ export function poolFrom(base: Slice[], cat: Slice['category']): Slice[] {
   return [...hits, ...extras]
 }
 
+/** Re-slicing makes new slice objects: keep a pin on any slice that still
+ * covers the start of a previously pinned one. */
+function carryPins(old: Slice[], next: Slice[]): Slice[] {
+  const starts = old.filter((s) => s.pinned).map((s) => s.start)
+  if (!starts.length) return next
+  for (const n of next) {
+    if (starts.some((t) => t >= n.start - 0.03 && t < n.start + n.duration)) n.pinned = true
+  }
+  return next
+}
+
 /**
  * Master manager: owns the AudioContext + Tone graph, a pool of sliced
  * sources, and five asynchronous generative voices on independent
@@ -90,6 +140,8 @@ export class AudioEngine {
   dsp: DSPChain | null = null
   analyser: AnalyserNode | null = null
   recorder: WavRecorder | null = null
+  /** live LUFS meter on the processed master */
+  meter: LoudnessMeter | null = null
 
   sources: SourceRec[] = []
   slices: Slice[] = []
@@ -151,6 +203,8 @@ export class AudioEngine {
   reverseProb = 0
   /** slice armed for keyboard performance (set by audition) */
   armedSliceId: number | null = null
+  /** how pinned slices steer the composition */
+  pinMode: PinMode = 'favor'
   /** source index currently raw-previewing (clean, no DSP), or null */
   previewSource: number | null = null
   private previewNodes: AudioBufferSourceNode[] = []
@@ -182,6 +236,22 @@ export class AudioEngine {
   private voiceRng: Rng[] = []
   /** V8 PINGS — West Coast FM chimes, level 0 (off) … 1 */
   pings = 0
+  /** MEMORY LAYERS: stretch clouds · returning motif · ghost voices */
+  memLayers: MemoryLayerParams = { ...LAYERS_OFF }
+  /** context time the running song started at (its t = 0) */
+  songT0 = 0
+  /** MIX: per-bus gains (applied live and in renders) */
+  mix: MixLevels = { ...MIX_DEFAULT }
+  /** MASTER: the release chain (previewed live, applied to every export) */
+  masterChain: MasterChain = { ...DEFAULT_CHAIN }
+  masterBypass = false
+  private liveMaster: LiveMaster | null = null
+  private voicesBus: GainNode | null = null
+  private voicesSend: GainNode | null = null
+  private mixBuses: Record<MixBus, { dry: GainNode; send: GainNode }> | null = null
+  private memTimer = 0
+  private memGens: Array<Generator<number, void, void>> = []
+  private memT: number[] = []
   private pingRng: Rng = mulberry32(1)
   private pingTimer = 0
   private pingGain: GainNode | null = null
@@ -190,6 +260,8 @@ export class AudioEngine {
   private sendGains: GainNode[] = []
   private duckGain: GainNode | null = null
   private timers: number[] = Array.from({ length: NUM_VOICES }, () => 0)
+  /** per voice: audio-clock time its next event / cycle starts */
+  private nextAt: number[] = Array.from({ length: NUM_VOICES }, () => 0)
   private driftTimer = 0
   private driftTargets: MacroParams | null = null
   private morphTimer = 0
@@ -233,7 +305,8 @@ export class AudioEngine {
   /** Must be called from a user gesture (browser autoplay policy). */
   async init() {
     if (this.ctx) return
-    const ctx = new AudioContext()
+    // 'playback': a larger output buffer — no crackle when the audio thread is busy (ambient needs no 10 ms response)
+    const ctx = new AudioContext({ latencyHint: 'playback' })
     await ctx.resume()
     Tone.setContext(ctx)
     this.ctx = ctx
@@ -243,38 +316,65 @@ export class AudioEngine {
     this.masterGain.gain.value = this.masterVolume
     Tone.connect(this.masterGain, this.dsp.input)
 
+    // MIX: the generative voices share one fader (dry + reverb send)
+    this.voicesBus = ctx.createGain()
+    this.voicesBus.gain.value = this.mix.voices
+    this.voicesBus.connect(this.masterGain)
+    this.voicesSend = ctx.createGain()
+    this.voicesSend.gain.value = this.mix.voices
+    Tone.connect(this.voicesSend, this.dsp.reverbSend)
+
     // voice 0 routes through a duck gain (sidechained by voice 1 hits)
     this.duckGain = ctx.createGain()
-    this.duckGain.connect(this.masterGain)
+    this.duckGain.connect(this.voicesBus)
 
     for (let i = 0; i < NUM_VOICES; i++) {
       const g = ctx.createGain()
       g.gain.value = 0
-      g.connect(i === 0 ? this.duckGain : this.masterGain)
+      g.connect(i === 0 ? this.duckGain : this.voicesBus)
       this.voiceGains.push(g)
       const s = ctx.createGain()
       s.gain.value = 0
-      Tone.connect(s, this.dsp.reverbSend)
+      s.connect(this.voicesSend)
       this.sendGains.push(s)
     }
 
     // V8 pings bus: pre-DSP (so chimes pass through the tape chain) + reverb send
     this.pingGain = ctx.createGain()
     this.pingGain.gain.value = 1
-    this.pingGain.connect(this.masterGain)
+    this.pingGain.connect(this.voicesBus)
     this.pingSend = ctx.createGain()
     this.pingSend.gain.value = this.pings * 0.5
     Tone.connect(this.pingSend, this.dsp.reverbSend)
 
+    // MEMORY LAYERS + era surfaces: one MIX bus each, pre-DSP like the pings
+    const bus = (k: keyof MixLevels) => {
+      const dry = ctx.createGain()
+      dry.gain.value = this.mix[k]
+      dry.connect(this.masterGain!)
+      const send = ctx.createGain()
+      send.gain.value = this.mix[k]
+      Tone.connect(send, this.dsp!.reverbSend)
+      return { dry, send }
+    }
+    this.mixBuses = { clouds: bus('clouds'), melody: bus('melody'), ghosts: bus('ghosts'), loop: bus('loop'), kin: bus('kin'), surface: bus('surface') }
+
     // analysis + recording taps off the processed master
+    // MASTER preview: studio output → release chain → speakers (and the meters)
+    this.dsp.output.disconnect()
+    this.liveMaster = new LiveMaster(ctx, this.masterChain)
+    this.liveMaster.setBypass(this.masterBypass)
+    Tone.connect(this.dsp.output, this.liveMaster.input)
+    this.liveMaster.output.connect(ctx.destination)
     const tap = ctx.createGain()
-    Tone.connect(this.dsp.output, tap)
+    this.liveMaster.output.connect(tap)
     this.tap = tap
     this.analyser = ctx.createAnalyser()
     this.analyser.fftSize = 2048
     this.analyser.smoothingTimeConstant = 0.85
     tap.connect(this.analyser)
     this.recorder = new WavRecorder(ctx, tap)
+    this.meter = new LoudnessMeter(ctx, tap)
 
     this.noiseBuffer = await renderSurfaceNoise(ctx.sampleRate)
     this.applyMacros()
@@ -312,21 +412,26 @@ export class AudioEngine {
       buf = await def.render(this.ctx.sampleRate)
       this.stemCache.set(key, buf)
     }
-    this.addSource(def.name, buf, key)
+    await this.addSource(def.name, buf, key, STEM_ORIGIN(def.name))
   }
 
   async addFile(file: File) {
     if (!this.ctx) return
     const data = await file.arrayBuffer()
     const buf = await this.ctx.decodeAudioData(data)
-    this.addSource(file.name, buf, null)
+    await this.addSource(file.name, buf, null, { kind: 'file', label: file.name, needsClearance: true })
   }
 
   async addYouTube(url: string) {
     if (!this.ctx) return
     const { title, full } = await this.fetchYouTube(url)
-    const cuts = extractHighlights(this.ctx, full)
-    this.addSource(`YT: ${title}`, cuts, null)
+    const { analysis } = await analyzeAsync(full, { slice: false })
+    const segs: Array<{ at: number; len: number; srcStart: number }> = []
+    const cuts = extractHighlights(this.ctx, full, 3, analysis, segs)
+    await this.addSource(`YT: ${title}`, cuts, null, {
+      kind: 'youtube', label: title, url, needsClearance: true,
+      segments: segs.map((s) => ({ ...s, label: title, url })),
+    })
   }
 
   /**
@@ -348,30 +453,48 @@ export class AudioEngine {
       return { added: 1, failed: [] }
     }
     const results = await Promise.allSettled(urls.map((u) => this.fetchYouTube(u)))
-    const ok: Array<{ title: string; full: AudioBuffer }> = []
+    const ok: Array<{ title: string; full: AudioBuffer; url: string }> = []
     const failed: string[] = []
     results.forEach((r, i) => {
-      if (r.status === 'fulfilled') ok.push(r.value)
+      if (r.status === 'fulfilled') ok.push({ ...r.value, url: urls[i] })
       else failed.push(`${urls[i]} — ${r.reason instanceof Error ? r.reason.message : r.reason}`)
     })
     if (ok.length === 0) throw new Error(failed.join('\n') || 'all fetches failed')
 
-    const analyses = ok.map((t) => analyzeSource(t.full))
+    const analyses = (
+      await Promise.all(ok.map((t) => analyzeAsync(t.full, { slice: false })))
+    ).map((r) => r.analysis)
     if (ok.length >= 2) this.autoScenesFromTracks(analyses)
 
     let wav: Blob | undefined
     if (mode === 'mixtape') {
       const buf = buildMixtape(this.ctx, ok.map((t, i) => ({ full: t.full, a: analyses[i] })))
-      this.addSource(`Mixtape — ${ok.length} track${ok.length > 1 ? 's' : ''}`, buf, null)
+      await this.addSource(`Mixtape — ${ok.length} track${ok.length > 1 ? 's' : ''}`, buf, null, {
+        kind: 'youtube', label: 'mixtape', needsClearance: true,
+        tracks: ok.map((t) => ({ label: t.title, url: t.url })),
+      })
       wav = encodeWav(buf.getChannelData(0), buf.getChannelData(1), buf.sampleRate)
     } else if (mode === 'interleave' && ok.length >= 2) {
       const perTrack = Math.max(1, Math.floor(6 / ok.length))
       const cuts = ok.map((t, i) => extractHighlights(this.ctx!, t.full, perTrack, analyses[i]))
-      this.addSource(`Weave — ${ok.length} tracks`, buildInterleave(this.ctx, cuts), null)
+      await this.addSource(`Weave — ${ok.length} tracks`, buildInterleave(this.ctx, cuts), null, {
+        kind: 'youtube', label: 'weave', needsClearance: true,
+        tracks: ok.map((t) => ({ label: t.title, url: t.url })),
+      })
     } else {
       const perTrack = Math.max(1, Math.floor(6 / ok.length))
-      const cuts = ok.map((t, i) => extractHighlights(this.ctx!, t.full, perTrack, analyses[i]))
-      this.addSource(`YT Collage — ${ok.length} tracks`, this.concatBuffers(cuts), null)
+      const segs: OriginSeg[] = []
+      let offset = 0
+      const cuts = ok.map((t, i) => {
+        const local: Array<{ at: number; len: number; srcStart: number }> = []
+        const cut = extractHighlights(this.ctx!, t.full, perTrack, analyses[i], local)
+        for (const s of local) segs.push({ ...s, at: s.at + offset, label: t.title, url: t.url })
+        offset += cut.duration
+        return cut
+      })
+      await this.addSource(`YT Collage — ${ok.length} tracks`, this.concatBuffers(cuts), null, {
+        kind: 'youtube', label: 'collage', needsClearance: true, segments: segs,
+      })
     }
     return { added: ok.length, failed, wav }
   }
@@ -381,7 +504,7 @@ export class AudioEngine {
    * darkness → decay/aging, contrast+onsets → chaos, brightness → scale),
    * chained into a 45s-per-track song sequence for renders.
    */
-  private autoScenesFromTracks(analyses: ReturnType<typeof analyzeSource>[]) {
+  private autoScenesFromTracks(analyses: SourceAnalysis[]) {
     const clamp = (v: number) => Math.min(1, Math.max(0, v))
     analyses.slice(0, 8).forEach((a, i) => {
       const c = trackCharacter(a)
@@ -433,7 +556,9 @@ export class AudioEngine {
     if (!this.ctx) return
     const analysis = await analyzeImage(file)
     const buf = await sonifyImage(analysis, this.ctx.sampleRate)
-    this.addSource(`Cover: ${file.name}`, buf, null)
+    await this.addSource(`Cover: ${file.name}`, buf, null, {
+      kind: 'image', label: `sonified image ${file.name} (check the image's rights)`, needsClearance: true,
+    })
     const patch = traitsToPatch(analysis)
     this.macros = patch.macros
     this.scale = patch.scale
@@ -479,32 +604,46 @@ export class AudioEngine {
         if (off >= d.length) break
       }
       const n = this.sources.filter((s) => s.name.startsWith('Mic')).length + 1
-      this.addSource(`Mic capture ${n}`, buf, null)
+      await this.addSource(`Mic capture ${n}`, buf, null, {
+        kind: 'mic', label: `Mic capture ${n} (${new Date().toLocaleString()})`, needsClearance: true,
+      })
     } finally {
       for (const t of stream.getTracks()) t.stop()
     }
   }
 
-  addSource(name: string, buffer: AudioBuffer, stemKey: string | null) {
+  /**
+   * Analyze + slice a buffer off the main thread (Web Worker), then add it
+   * to the pool. Emits a change so the UI updates even if not awaited.
+   */
+  async addSource(name: string, buffer: AudioBuffer, stemKey: string | null, origin?: SourceOrigin) {
+    const { analysis, bounds, slices } = await analyzeAsync(buffer, {
+      maxSlice: this.fragMaxSlice,
+      minSlice: this.fragMinSlice,
+    })
     if (this.sources.length >= MAX_SOURCES) this.removeSource(0)
-    const analysis = analyzeSource(buffer)
-    const bounds = detectBounds(analysis)
-    const rec: SourceRec = { name, stemKey, buffer, analysis, bounds, manual: false, slices: [] }
-    rec.slices = buildSlices(
-      analysis, bounds, false, this.fragMaxSlice, this.fragMinSlice,
-    ) as Slice[]
+    const rec: SourceRec = {
+      name, stemKey, buffer, analysis, bounds, manual: false, slices: (slices ?? []) as Slice[], origin,
+    }
     this.sources.push(rec)
     this.rebuildSlices()
+    this.emitChange()
   }
 
   /** Restore a source with saved bounds (crate loading). */
-  restoreSource(name: string, buffer: AudioBuffer, stemKey: string | null, bounds: number[], manual: boolean) {
+  async restoreSource(
+    name: string, buffer: AudioBuffer, stemKey: string | null, bounds: number[], manual: boolean,
+    origin?: SourceOrigin,
+  ) {
+    const res = await analyzeAsync(buffer, { bounds, manual })
     if (this.sources.length >= MAX_SOURCES) this.removeSource(0)
-    const analysis = analyzeSource(buffer)
-    const rec: SourceRec = { name, stemKey, buffer, analysis, bounds, manual, slices: [] }
-    rec.slices = buildSlices(analysis, bounds, manual) as Slice[]
+    const rec: SourceRec = {
+      name, stemKey, buffer, analysis: res.analysis, bounds, manual, slices: (res.slices ?? []) as Slice[],
+      origin: origin ?? (stemKey ? STEM_ORIGIN(name) : undefined),
+    }
     this.sources.push(rec)
     this.rebuildSlices()
+    this.emitChange()
   }
 
   clearSources() {
@@ -545,7 +684,7 @@ export class AudioEngine {
     if (near >= 0) src.bounds.splice(near, 1)
     else if (time > 0.01 && time < src.buffer.duration - 0.01) src.bounds.push(time)
     src.manual = true
-    src.slices = buildSlices(src.analysis, src.bounds, true) as Slice[]
+    src.slices = carryPins(src.slices, buildSlices(src.analysis, src.bounds, true) as Slice[])
     this.rebuildSlices()
   }
 
@@ -574,6 +713,7 @@ export class AudioEngine {
   play() {
     if (!this.ctx || this.slices.length === 0 || this.playing) return
     this.playing = true
+    this.nextAt.fill(0)
     this.scheduleVoice1()
     this.scheduleVoice2()
     this.scheduleVoice3()
@@ -586,6 +726,7 @@ export class AudioEngine {
     if (this.tape) this.scheduleTapeGesture()
     if (this.pings > 0) this.schedulePings()
     this.applyBlockTimer()
+    this.startMemLayers()
   }
 
   pause() {
@@ -595,6 +736,7 @@ export class AudioEngine {
     window.clearTimeout(this.tapeTimer)
     window.clearTimeout(this.pingTimer)
     window.clearInterval(this.blockTimer)
+    this.startMemLayers() // not playing any more: this only stops them
     for (const src of this.activeSources) {
       try {
         src.stop()
@@ -719,6 +861,15 @@ export class AudioEngine {
       this.lastPadSemis = null
       this.chordUiTimer = window.setInterval(() => this.emitChange(), 2000)
     }
+  }
+
+  /** Set the key by hand (0–11, C = 0); rebuilds the chord progression. */
+  setKeyRoot(pc: number) {
+    this.keyRoot = ((Math.round(pc) % 12) + 12) % 12
+    if (this.keyLock) this.rebuildProgression()
+    this.lastPadSemis = null
+    if (this.playing) this.startMemLayers()
+    this.emitChange()
   }
 
   setPadMode(on: boolean) {
@@ -1531,6 +1682,9 @@ export class AudioEngine {
     if (on && this.playing) this.scheduleDubGesture()
   }
 
+  /** fragment regime the current slices were built with */
+  private slicedFrag: 'fine' | 'mid' | 'long' = 'fine'
+
   /** grain/cycle length multiplier for the current fragment regime */
   get fragK(): number {
     return this.fragLen === 'long' ? 4.5 : this.fragLen === 'mid' ? 2.2 : 1
@@ -1551,14 +1705,19 @@ export class AudioEngine {
    */
   setFragLen(mode: 'fine' | 'mid' | 'long') {
     this.fragLen = mode
-    for (const src of this.sources) {
-      if (!src.manual) {
-        src.slices = buildSlices(
-          src.analysis, src.bounds, false, this.fragMaxSlice, this.fragMinSlice,
-        ) as Slice[]
+    // re-slicing every source is expensive; presets call this with the
+    // mode that is already active most of the time
+    if (this.slicedFrag !== mode) {
+      for (const src of this.sources) {
+        if (!src.manual) {
+          src.slices = carryPins(src.slices, buildSlices(
+            src.analysis, src.bounds, false, this.fragMaxSlice, this.fragMinSlice,
+          ) as Slice[])
+        }
       }
+      this.rebuildSlices()
+      this.slicedFrag = mode
     }
-    this.rebuildSlices()
     this.loopCells = this.loopCells.map(() => null)
     this.phraseRegion = null
   }
@@ -1790,7 +1949,14 @@ export class AudioEngine {
       }
     }
     const n = this.sources.filter((s) => s.name.startsWith('Freeze')).length + 1
-    this.addSource(`Freeze ${n}`, buf, null)
+    // a resample carries everything that was in the pool at that moment
+    const inPool = this.sources.filter((s) => s.origin?.needsClearance !== false)
+    await this.addSource(`Freeze ${n}`, buf, null, {
+      kind: 'resample',
+      label: `Freeze ${n} — resampled studio output`,
+      needsClearance: inPool.length > 0,
+      tracks: inPool.flatMap((s) => s.origin?.tracks ?? s.origin?.segments?.map((g) => ({ label: g.label, url: g.url })) ?? [{ label: s.origin?.label ?? s.name, url: s.origin?.url }]),
+    })
   }
 
   /** Slow autonomous random-walk of the three macros. */
@@ -1882,15 +2048,19 @@ export class AudioEngine {
   }
 
   /** Live song mode: sequence of scene sections, morphing between them. */
-  playSong(loop = true) {
+  playSong(loop = true, from = 0) {
     if (this.songSections.length === 0) return
     if (this.songSections.some((s) => !this.scenes[s.scene])) return
     this.stopSong()
     this.songActive = true
     if (!this.playing) this.play()
+    from = Math.max(0, Math.min(this.songSections.length - 1, from))
+    const before = this.songSections.slice(0, from).reduce((n, x) => n + x.sec, 0)
+    this.songT0 = (this.ctx?.currentTime ?? 0) - before
+    this.startMemLayers() // the layers follow the form: restart them on its clock
     const step = (i: number) => {
       const sec = this.songSections[i]
-      this.morphTo(sec.scene, Math.min(8, Math.max(1, sec.sec / 3)))
+      this.morphTo(sec.scene, i === from && from > 0 ? 0.5 : Math.min(8, Math.max(1, sec.sec / 3)))
       const next = i + 1
       if (next < this.songSections.length) {
         this.songTimer = window.setTimeout(() => step(next), sec.sec * 1000)
@@ -1903,8 +2073,141 @@ export class AudioEngine {
         }, sec.sec * 1000)
       }
     }
-    step(0)
+    step(from)
     this.emitChange()
+  }
+
+  /** Seconds into the running song, or null. */
+  songPosition(): number | null {
+    if (!this.songActive || !this.ctx) return null
+    return this.ctx.currentTime - this.songT0
+  }
+
+  // ---------- memory layers (live) ----------
+
+  setMemoryLayers(p: Partial<MemoryLayerParams>) {
+    this.memLayers = { ...this.memLayers, ...p }
+    this.startMemLayers()
+    this.emitChange()
+  }
+
+  // ---------- mix & master ----------
+
+  setMix(p: Partial<MixLevels>) {
+    this.mix = { ...this.mix, ...p }
+    const t = this.ctx?.currentTime ?? 0
+    const set = (n: GainNode | null | undefined, v: number) => n?.gain.setTargetAtTime(v, t, 0.04)
+    set(this.voicesBus, this.mix.voices)
+    set(this.voicesSend, this.mix.voices)
+    if (this.mixBuses) {
+      for (const k of MIX_BUSES) {
+        set(this.mixBuses[k].dry, this.mix[k])
+        set(this.mixBuses[k].send, this.mix[k])
+      }
+    }
+    this.emitChange()
+  }
+
+  setMasterChain(c: Partial<MasterChain>) {
+    this.masterChain = { ...this.masterChain, ...c }
+    this.liveMaster?.set(this.masterChain)
+    this.emitChange()
+  }
+
+  setMasterBypass(b: boolean) {
+    this.masterBypass = b
+    this.liveMaster?.setBypass(b)
+    this.emitChange()
+  }
+
+  setSourceEra(i: number, era: Era) {
+    const src = this.sources[i]
+    if (!src) return
+    src.era = era
+    this.startMemLayers() // era surfaces follow the media in use
+    this.emitChange()
+  }
+
+  /** Precompute the stretch clouds (async, chunked); restarts the layers when ready. */
+  async prepareMemory(): Promise<void> {
+    await prepareStretches(this.slices, this.sources)
+    if (this.playing) this.startMemLayers()
+  }
+
+  private memSourceNodes = new Set<AudioBufferSourceNode>()
+  /** bumps on every (re)start: late async work for an older start is dropped */
+  private memGenId = 0
+
+  /** (Re)start the layer lanes and era surfaces on the live clock. */
+  private startMemLayers() {
+    window.clearInterval(this.memTimer)
+    this.memGenId++
+    for (const n of this.memSourceNodes) {
+      try { n.stop() } catch { /* done */ }
+    }
+    this.memSourceNodes.clear()
+    this.memGens = []
+    const ctx = this.ctx
+    const buses = this.mixBuses
+    if (!ctx || !this.playing || !buses) return
+    const start = ctx.currentTime + 0.15
+    const track = (n: AudioBufferSourceNode) => {
+      this.memSourceNodes.add(n)
+      n.addEventListener('ended', () => this.memSourceNodes.delete(n))
+    }
+    const eras = this.sources.filter((x) => !x.bed).map((x) => x.era ?? 'none')
+    for (const n of startEraSurfaces(ctx, buses.surface.dry, eras, start, this.seed)) track(n)
+    // media heard for the first time: their noise is made in a worker, and fades in when ready
+    const missing = eras.filter((x) => !eraSurfaceReady(ctx.sampleRate, x))
+    if (missing.length) {
+      const gen = ++this.memGenId
+      void ensureEraSurfaces(ctx.sampleRate, missing).then(() => {
+        if (gen !== this.memGenId || !this.playing || !this.ctx) return
+        for (const n of startEraSurfaces(this.ctx, buses.surface.dry, missing, this.ctx.currentTime + 0.05, this.seed)) track(n)
+      })
+    }
+    this.memGens = memoryLanes({
+      ctx,
+      buses,
+      start,
+      end: Infinity,
+      seed: this.seed,
+      params: this.memLayers,
+      keyRoot: this.keyRoot,
+      slices: this.slices,
+      sources: this.sources,
+      chordAt: (w) => this.chordAtTime(w),
+      sectionAt: (w) => (this.songActive && isMemoryForm(this) ? sectionIndexAt(this.songSections, w - this.songT0) : -1),
+      sectionSpan: (w) => {
+        if (!this.songActive || !isMemoryForm(this)) return null
+        const sp = sectionSpanAt(this.songSections, w - this.songT0)
+        return sp && { index: sp.index, start: sp.start + this.songT0, end: sp.end + this.songT0 }
+      },
+      formPos: (w) => {
+        if (!this.songActive || !isMemoryForm(this)) return null
+        const total = this.songSections.reduce((n, x) => n + x.sec, 0)
+        return { t: Math.max(0, w - this.songT0), total }
+      },
+      track,
+    })
+    this.memT = this.memGens.map(() => 0)
+    const tick = () => {
+      const horizon = (this.ctx?.currentTime ?? 0) + 5
+      this.memGens.forEach((g, i) => {
+        let guard = 0
+        while (this.memT[i] >= 0 && this.memT[i] < horizon && guard++ < 50) {
+          try {
+            const r = g.next()
+            this.memT[i] = r.done ? -1 : r.value
+          } catch (e) {
+            console.warn('memory layer skipped:', e)
+            this.memT[i] = -1
+          }
+        }
+      })
+    }
+    tick()
+    this.memTimer = window.setInterval(tick, 700)
   }
 
   stopSong() {
@@ -1960,7 +2263,36 @@ export class AudioEngine {
   }
 
   private emit(e: FiredEvent) {
+    // scheduled ahead: light the UI when it sounds, not when it was queued
+    const ahead = this.ctx ? e.time - this.ctx.currentTime : 0
+    if (ahead > 0.04) {
+      window.setTimeout(() => { if (this.playing) for (const fn of this.listeners) fn(e) }, ahead * 1000)
+      return
+    }
     for (const fn of this.listeners) fn(e)
+  }
+
+  /**
+   * Fill one voice's schedule up to AHEAD seconds from now. `step(t0)` lays
+   * out what starts at t0 and returns how long until the next start (null =
+   * nothing possible now, retry in a second).
+   */
+  private drive(v: number, again: () => void, step: (t0: number) => number | null) {
+    const ctx = this.ctx
+    if (!ctx || !this.playing) return
+    const now = ctx.currentTime
+    // fell behind (first start, or the thread was frozen): restart from now
+    if (this.nextAt[v] < now + LOOKAHEAD) this.nextAt[v] = now + LOOKAHEAD
+    let guard = 0
+    while (this.nextAt[v] < now + AHEAD && guard++ < 64) {
+      const d = step(this.nextAt[v])
+      if (d == null) {
+        this.timers[v] = window.setTimeout(again, 1000)
+        return
+      }
+      this.nextAt[v] += Math.max(0.03, d)
+    }
+    this.timers[v] = window.setTimeout(again, Math.max(15, (this.nextAt[v] - ctx.currentTime - WAKE) * 1000))
   }
 
   private emitChange() {
@@ -2031,6 +2363,8 @@ export class AudioEngine {
       head.connect(bp)
       head = bp
     }
+    const era = this.sources[slice.sourceIdx]?.era
+    if (era && era !== 'none') head = eraChain(this.ctx, head, src, era, Math.random, when)
     const panner = this.ctx.createStereoPanner()
     panner.pan.value = ev.pan
     head.connect(env)
@@ -2096,7 +2430,7 @@ export class AudioEngine {
       cut.getChannelData(ch).set(src.buffer.getChannelData(ch).subarray(from, from + len))
     }
     const base = src.name.replace(/^Cut — /, '').slice(0, 24)
-    this.addSource(`Cut — ${base} ${s.toFixed(1)}–${(s + d).toFixed(1)}s`, cut, null)
+    void this.addSource(`Cut — ${base} ${s.toFixed(1)}–${(s + d).toFixed(1)}s`, cut, null, cutOrigin(src.origin, src.name, s, d))
   }
 
   /** Several mouse-selected regions spliced hard into one new source. */
@@ -2124,7 +2458,9 @@ export class AudioEngine {
       }
     }
     const base = src.name.replace(/^(Cut|Splice) — /, '').slice(0, 24)
-    this.addSource(`Splice — ${base} (${parts.length} cuts)`, out, null)
+    void this.addSource(`Splice — ${base} (${parts.length} cuts)`, out, null, spliceOrigin(
+      src.origin, src.name, parts.map((p) => ({ start: p.from / sr, dur: p.len / sr })),
+    ))
   }
 
   /**
@@ -2275,8 +2611,83 @@ export class AudioEngine {
   /** Category pool restricted to a voice's routing mask (with top-up). */
   poolFor(voice: number, cat: Slice['category']): Slice[] {
     const mask = this.sourceMasks[voice]
-    const scoped = mask ? this.slices.filter((s) => mask.includes(s.sourceIdx)) : this.slices
-    return poolFrom(scoped.length ? scoped : this.slices, cat)
+    const masked = mask ? this.slices.filter((s) => mask.includes(s.sourceIdx)) : this.slices
+    const scoped = masked.length ? masked : this.slices
+    if (this.pinMode !== 'all') {
+      const pins = scoped.filter((s) => s.pinned)
+      if (pins.length) {
+        // ONLY: the composition is made of your dots alone (poolFrom still
+        // lends every voice the closest pinned match for its category)
+        if (this.pinMode === 'only') return poolFrom(pins, cat)
+        // FAVOR: the full pool plus the pinned dots repeated until they make
+        // up about half of every voice's choices — whatever their category
+        // (poolFrom lends each voice its closest pinned match). Deterministic,
+        // so seeded renders still repeat exactly.
+        const base = poolFrom(scoped, cat)
+        const fav = poolFrom(pins, cat)
+        const reps = Math.max(1, Math.round(base.length / fav.length))
+        const out = [...base]
+        for (let r = 0; r < reps; r++) out.push(...fav)
+        return out
+      }
+    }
+    return poolFrom(scoped, cat)
+  }
+
+  // ---------- pinned slices (hand-picked dots) ----------
+
+  pinnedSlices(): Slice[] {
+    return this.slices.filter((s) => s.pinned)
+  }
+
+  setPinned(ids: number[], on: boolean) {
+    for (const id of ids) {
+      const s = this.slices[id]
+      if (s) s.pinned = on
+    }
+    this.pinsChanged()
+  }
+
+  togglePin(id: number) {
+    const s = this.slices[id]
+    if (!s) return
+    s.pinned = !s.pinned
+    this.pinsChanged()
+  }
+
+  clearPins() {
+    for (const s of this.slices) s.pinned = false
+    this.pinsChanged()
+  }
+
+  /** Pin the n slices closest in timbre (brightness · length · loudness) to `id`. */
+  pinSimilar(id: number, n = 4) {
+    const ref = this.slices[id]
+    if (!ref) return
+    const d = (s: Slice) =>
+      Math.abs(Math.log((s.centroid + 1) / (ref.centroid + 1))) +
+      Math.abs(Math.log((s.duration + 0.01) / (ref.duration + 0.01))) +
+      Math.abs(s.rms - ref.rms) * 8
+    ref.pinned = true
+    this.slices
+      .filter((s) => s !== ref && !s.pinned)
+      .sort((a, b) => d(a) - d(b))
+      .slice(0, n)
+      .forEach((s) => (s.pinned = true))
+    this.pinsChanged()
+  }
+
+  setPinMode(m: PinMode) {
+    this.pinMode = m
+    this.pinsChanged()
+  }
+
+  private pinsChanged() {
+    // loop cells and the Markov walk hold old picks: let the new pool sound now
+    this.loopCells = this.loopCells.map(() => null)
+    this.markovIdx = -1
+    if (this.playing && layersActive(this.memLayers)) this.startMemLayers()
+    this.emitChange()
   }
 
   byCategory(cat: Slice['category']): Slice[] {
@@ -2349,9 +2760,8 @@ export class AudioEngine {
   }
 
   /** Replay a voice's cell verbatim; every 8th repeat may mutate one event. */
-  private runLooped(voice: number): number {
+  private runLooped(voice: number, t0 = this.ctx!.currentTime + LOOKAHEAD): number {
     const cell = this.loopCells[voice] ?? (this.loopCells[voice] = this.captureCell(voice))
-    const t0 = this.ctx!.currentTime + LOOKAHEAD
     for (const ev of cell.events) this.realizeEvent(ev, t0 + ev.t)
     cell.reps++
     if (cell.reps % 8 === 0 && cell.events.length > 0 && this.voiceRng[voice]() < 0.6) {
@@ -2397,56 +2807,41 @@ export class AudioEngine {
   }
 
   private scheduleVoice1() {
-    if (!this.playing || !this.ctx) return
-    if (this.phraseMode) {
-      // PHRASE: one onset-aligned region looping verbatim with a crossfade
-      const region = this.phraseRegion ?? this.pickPhraseRegion(this.voiceRng[0])
-      if (region) {
-        const ev = this.phraseEventFor(region)
-        if (ev) this.realizeEvent(ev, this.ctx.currentTime + LOOKAHEAD)
-        this.phraseCycle = { start: this.ctx.currentTime + LOOKAHEAD, region }
-        this.timers[0] = window.setTimeout(
-          () => this.scheduleVoice1(),
-          Math.max(300, (region.dur - 0.08) * 1000),
-        )
-        return
+    this.drive(0, () => this.scheduleVoice1(), (t0) => {
+      if (this.phraseMode) {
+        // PHRASE: one onset-aligned region looping verbatim with a crossfade
+        const region = this.phraseRegion ?? this.pickPhraseRegion(this.voiceRng[0])
+        if (region) {
+          const ev = this.phraseEventFor(region)
+          if (ev) this.realizeEvent(ev, t0)
+          this.phraseCycle = { start: t0, region }
+          return Math.max(0.3, region.dur - 0.08)
+        }
       }
-    }
-    if (this.looped) {
-      const dur = this.runLooped(0)
-      this.timers[0] = window.setTimeout(() => this.scheduleVoice1(), dur * 1000)
-      return
-    }
-    const { events, cycleDur, sliceChroma, padSemis } = genV1Cycle(
-      this.poolFor(0, 'harmonic'),
-      this.voices[0],
-      this.macros,
-      this.scale,
-      this.voiceRng[0],
-      this.tape,
-      this.harmCtxAt(this.ctx.currentTime + LOOKAHEAD),
-      this.fragK,
-      this.reverseProb,
-    )
-    this.lastV1Chroma = sliceChroma
-    if (padSemis) this.lastPadSemis = padSemis
-    const t0 = this.ctx.currentTime + LOOKAHEAD
-    for (const ev of events) this.realizeEvent(ev, t0 + ev.t)
-    // overlap the next cycle slightly so slice changes crossfade
-    this.timers[0] = window.setTimeout(
-      () => this.scheduleVoice1(),
-      Math.max(1, cycleDur - 0.6) * 1000,
-    )
+      if (this.looped) return this.runLooped(0, t0)
+      const { events, cycleDur, sliceChroma, padSemis } = genV1Cycle(
+        this.poolFor(0, 'harmonic'),
+        this.voices[0],
+        this.macros,
+        this.scale,
+        this.voiceRng[0],
+        this.tape,
+        this.harmCtxAt(t0),
+        this.fragK,
+        this.reverseProb,
+      )
+      this.lastV1Chroma = sliceChroma
+      if (padSemis) this.lastPadSemis = padSemis
+      for (const ev of events) this.realizeEvent(ev, t0 + ev.t)
+      // overlap the next cycle slightly so slice changes crossfade
+      return Math.max(1, cycleDur - 0.6)
+    })
   }
 
   private scheduleVoice2() {
     if (!this.playing || !this.ctx) return
-    if (this.looped) {
-      const dur = this.runLooped(1)
-      this.timers[1] = window.setTimeout(() => this.scheduleVoice2(), dur * 1000)
-      return
-    }
-    if (this.groove) {
+    if (this.groove && !this.looped) {
+      this.nextAt[1] = 0 // leaving the groove later starts fresh
       // batch-schedule a lookahead window of grid onsets so background-tab
       // timer throttling (≥1s) can't starve the groove
       const horizon = this.ctx.currentTime + 2.4
@@ -2471,33 +2866,31 @@ export class AudioEngine {
       this.timers[1] = window.setTimeout(() => this.scheduleVoice2(), 1200)
       return
     }
-    const { event, dt, idx } = genV2Step(
-      this.poolFor(1, 'transient'),
-      this.voices[1],
-      this.macros,
-      this.bpm,
-      this.markovIdx,
-      this.voiceRng[1],
-    )
-    this.markovIdx = idx
-    this.realizeEvent(event, this.ctx.currentTime + LOOKAHEAD)
-    this.timers[1] = window.setTimeout(() => this.scheduleVoice2(), dt * 1000)
+    this.drive(1, () => this.scheduleVoice2(), (t0) => {
+      if (this.looped) return this.runLooped(1, t0)
+      if (this.groove) return null // switched on meanwhile: the groove branch takes over
+      const { event, dt, idx } = genV2Step(
+        this.poolFor(1, 'transient'),
+        this.voices[1],
+        this.macros,
+        this.bpm,
+        this.markovIdx,
+        this.voiceRng[1],
+      )
+      this.markovIdx = idx
+      this.realizeEvent(event, t0)
+      return dt
+    })
   }
 
   private scheduleVoice3() {
-    if (!this.playing || !this.ctx) return
-    if (this.looped) {
-      const dur = this.runLooped(2)
-      this.timers[2] = window.setTimeout(() => this.scheduleVoice3(), dur * 1000)
-      return
-    }
-    const pool = [...this.poolFor(2, 'texture'), ...this.poolFor(2, 'harmonic')]
-    const { event, dt } = genV3Step(
-      pool, this.voices[2], this.voiceRng[2], this.tape,
-      this.harmCtxAt(this.ctx.currentTime + LOOKAHEAD),
-    )
-    this.realizeEvent(event, this.ctx.currentTime + LOOKAHEAD)
-    this.timers[2] = window.setTimeout(() => this.scheduleVoice3(), dt * 1000)
+    this.drive(2, () => this.scheduleVoice3(), (t0) => {
+      if (this.looped) return this.runLooped(2, t0)
+      const pool = [...this.poolFor(2, 'texture'), ...this.poolFor(2, 'harmonic')]
+      const { event, dt } = genV3Step(pool, this.voices[2], this.voiceRng[2], this.tape, this.harmCtxAt(t0))
+      this.realizeEvent(event, t0)
+      return dt
+    })
   }
 
   private startVoice4() {
@@ -2518,43 +2911,30 @@ export class AudioEngine {
   }
 
   private scheduleVoice5() {
-    if (!this.playing || !this.ctx) return
-    if (this.looped) {
-      const dur = this.runLooped(4)
-      this.timers[4] = window.setTimeout(() => this.scheduleVoice5(), dur * 1000)
-      return
-    }
-    const pool = [...this.poolFor(4, 'transient'), ...this.poolFor(4, 'harmonic')]
-    const { events, dt } = genV5Cell(
-      pool, this.voices[4], this.macros, this.scale, this.voiceRng[4],
-      this.harmCtxAt(this.ctx.currentTime + LOOKAHEAD), this.fragK,
-    )
-    const t0 = this.ctx.currentTime + LOOKAHEAD
-    for (const ev of events) this.realizeEvent(ev, t0 + ev.t)
-    this.timers[4] = window.setTimeout(() => this.scheduleVoice5(), dt * 1000)
+    this.drive(4, () => this.scheduleVoice5(), (t0) => {
+      if (this.looped) return this.runLooped(4, t0)
+      const pool = [...this.poolFor(4, 'transient'), ...this.poolFor(4, 'harmonic')]
+      const { events, dt } = genV5Cell(
+        pool, this.voices[4], this.macros, this.scale, this.voiceRng[4], this.harmCtxAt(t0), this.fragK,
+      )
+      for (const ev of events) this.realizeEvent(ev, t0 + ev.t)
+      return dt
+    })
   }
 
   /** Voice 7 — melody: motif phrases (needs CHORDLOCK for a harmonic frame). */
   private scheduleVoice7() {
-    if (!this.playing || !this.ctx) return
-    if (this.looped) {
-      const dur = this.runLooped(6)
-      this.timers[6] = window.setTimeout(() => this.scheduleVoice7(), dur * 1000)
-      return
-    }
-    const harm = this.harmCtxAt(this.ctx.currentTime + LOOKAHEAD)
-    if (!harm) {
-      this.timers[6] = window.setTimeout(() => this.scheduleVoice7(), 2000)
-      return
-    }
-    const { events, dur, motif } = genV7Phrase(
-      this.poolFor(6, 'harmonic'), this.voices[6], harm, this.bpm, this.voiceRng[6],
-      this.melodyMotif,
-    )
-    this.melodyMotif = motif
-    const t0 = this.ctx.currentTime + LOOKAHEAD
-    for (const ev of events) this.realizeEvent(ev, t0 + ev.t)
-    this.timers[6] = window.setTimeout(() => this.scheduleVoice7(), dur * 1000)
+    this.drive(6, () => this.scheduleVoice7(), (t0) => {
+      if (this.looped) return this.runLooped(6, t0)
+      const harm = this.harmCtxAt(t0)
+      if (!harm) return null
+      const { events, dur, motif } = genV7Phrase(
+        this.poolFor(6, 'harmonic'), this.voices[6], harm, this.bpm, this.voiceRng[6], this.melodyMotif,
+      )
+      this.melodyMotif = motif
+      for (const ev of events) this.realizeEvent(ev, t0 + ev.t)
+      return dur
+    })
   }
 
   /**

@@ -181,8 +181,8 @@ export class DSPChain {
   /** Spectral tilt: -1 = dark (bass up / top down), +1 = bright. ±6dB shelves. */
   setTilt(v: number) {
     const t = Math.min(1, Math.max(-1, v))
-    this.tiltLow.gain.rampTo(-t * 6, 0.1)
-    this.tiltHigh.gain.rampTo(t * 6, 0.1)
+    this.tiltLow.gain.linearRampTo(-t * 6, 0.1)
+    this.tiltHigh.gain.linearRampTo(t * 6, 0.1)
   }
 
   /** Decay Factor macro: reverb wetness + decay time (grain length lives in the engine). */
@@ -205,7 +205,7 @@ export class DSPChain {
   /** Vintage voicing: HP 320Hz (12dB/oct) + bell +2.5dB@1.2kHz + LP 5.5kHz (24dB/oct). */
   setVoicing(on: boolean) {
     this.voicingHP.frequency.rampTo(on ? 320 : 5, 0.2)
-    this.voicingBell.gain.rampTo(on ? 2.5 : 0, 0.2)
+    this.voicingBell.gain.linearRampTo(on ? 2.5 : 0, 0.2)
     this.voicingLP.frequency.rampTo(on ? 5500 : 20000, 0.2)
   }
 
